@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""
+加拿大开放数据平台 — 招标数据爬取、上传与邮件通知
+
+用法:
+  python3 canada_tender.py --sender 发件邮箱 --auth-code 授权码 --recipient 收件邮箱 [--full]
+
+  不传 --full 时，仅下载 "New tender notices" 和 "Open tender notices" 两份 CSV；
+  传入 --full 时，爬取全量资源。
+"""
+
+import argparse
+import os
+import re
+import smtplib
+import sys
+import time
+import requests
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from urllib.parse import urljoin, urlparse
+
+from playwright.sync_api import sync_playwright
+
+
+# ==================== 固定配置 ====================
+
+TARGET_URL = (
+    "https://open.canada.ca/data/en/dataset/"
+    "6abd20d4-7a1c-4b38-baa2-9525d0bb2fd2/"
+    "resource/05b804dd-11ec-4271-8d69-d6044e1a5481"
+)
+EXCLUDE_KEYWORDS = ["supporting documentation", "data dictionary"]
+GOFILE_API = "https://api.gofile.io"
+VIEWPORT = {"width": 1280, "height": 800}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+SAVE_DIR = os.path.join(os.getcwd(), "加拿大招标")
+
+# ==================== 工具函数 ====================
+
+def extract_filename_from_response(resp):
+    """从 HTTP 响应头 Content-Disposition 提取文件名"""
+    cd = resp.headers.get("Content-Disposition", "")
+    if cd:
+        match = re.search(
+            r'filename[^;=\n]*=(["\']?)(.+?)\1(;|$)', cd, re.IGNORECASE
+        )
+        if match:
+            return match.group(2).strip()
+    return None
+
+
+def download_with_requests(url, save_path, timeout=120):
+    """使用 requests 下载文件（优先方式）"""
+    headers = {"User-Agent": USER_AGENT}
+    resp = requests.get(
+        url, stream=True, timeout=timeout, headers=headers, allow_redirects=True
+    )
+    resp.raise_for_status()
+
+    filename = extract_filename_from_response(resp)
+    if not filename:
+        filename = os.path.basename(urlparse(resp.url).path)
+
+    with open(save_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+    return filename
+
+
+def create_gofile_account():
+    """创建 Gofile 匿名账户，返回 token 和 rootFolderId"""
+    resp = requests.post(f"{GOFILE_API}/accounts")
+    data = resp.json()["data"]
+    return data["token"], data["rootFolder"]
+
+
+def upload_to_gofile(filepath, token, folder_id):
+    """上传单个文件到 Gofile"""
+    filename = os.path.basename(filepath)
+    filesize = os.path.getsize(filepath)
+    print(f"  上传: {filename} ({filesize / 1024 / 1024:.1f} MB)")
+
+    # 获取最佳服务器
+    resp = requests.get(f"{GOFILE_API}/servers", params={"token": token})
+    servers = resp.json()["data"]["servers"]
+    na_servers = [s["name"] for s in servers if s["zone"] == "na"]
+    server = na_servers[0] if na_servers else servers[0]["name"]
+
+    # 上传
+    upload_url = f"https://{server}.gofile.io/contents/uploadfile"
+    start_time = time.time()
+    with open(filepath, "rb") as f:
+        files = {"file": (filename, f)}
+        data = {"token": token, "folderId": folder_id}
+        resp = requests.post(upload_url, files=files, data=data, timeout=1800)
+
+    elapsed = time.time() - start_time
+    result = resp.json()
+    if result.get("status") != "ok":
+        raise Exception(f"上传失败: {result}")
+
+    download_page = result["data"]["downloadPage"]
+    print(f"  上传成功! ({elapsed:.1f}s) 下载页: {download_page}")
+
+    return {
+        "filename": filename,
+        "downloadPage": download_page,
+        "fileId": result["data"]["id"],
+        "size": filesize,
+    }
+
+
+def set_gofile_folder_public(folder_id, token):
+    """设置 Gofile 文件夹为公开访问（关键步骤！）"""
+    resp = requests.put(
+        f"{GOFILE_API}/contents/{folder_id}/update",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={"attribute": "public", "attributeValue": True},
+    )
+    return resp.json()
+
+
+def send_email(subject, body, sender, auth_code, recipient):
+    """通过 QQ 邮箱 SMTP 发送邮件"""
+    msg = MIMEMultipart()
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
+        server.login(sender, auth_code)
+        server.sendmail(sender, recipient, msg.as_string())
+
+
+# ==================== 主流程 ====================
+
+def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(
+        description="加拿大开放数据平台 — 招标数据爬取、上传与邮件通知"
+    )
+    parser.add_argument(
+        "--sender", required=True, help="发件邮箱（QQ 邮箱）"
+    )
+    parser.add_argument(
+        "--auth-code", required=True, help="发件邮箱 SMTP 授权码"
+    )
+    parser.add_argument(
+        "--recipient", required=True, help="收件邮箱"
+    )
+    parser.add_argument(
+        "--full", action="store_true", default=False,
+        help="爬取全量资源（默认仅下载 New tender notices 和 Open tender notices）"
+    )
+    args = parser.parse_args()
+
+    sender = args.sender
+    auth_code = args.auth_code
+    recipient = args.recipient
+    full_mode = args.full
+
+    if full_mode:
+        print("模式: 全量爬取")
+    else:
+        print("模式: 仅下载 New tender notices 和 Open tender notices")
+
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    print(f"保存目录: {SAVE_DIR}\n")
+
+    # ====== 阶段一：浏览器爬取与下载 ======
+
+    with sync_playwright() as p:
+        # 步骤 1：初始化浏览器
+        print("[步骤1] 初始化浏览器...")
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
+        context = browser.new_context(
+            viewport=VIEWPORT,
+            user_agent=USER_AGENT,
+            bypass_csp=True,
+            accept_downloads=True,
+        )
+        page = context.new_page()
+        page.set_default_timeout(120000)
+        page.set_default_navigation_timeout(120000)
+
+        # 步骤 2：访问目标页面
+        print("[步骤2] 访问目标页面...")
+        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=120000)
+        page.wait_for_load_state("load", timeout=60000)
+        print("  页面加载完成")
+
+        # 步骤 3：点击【Show more】展开资源列表
+        print("[步骤3] 尝试点击【Show more】...")
+        try:
+            show_more = page.wait_for_selector(
+                "#show-all-resources--label--more", timeout=10000
+            )
+            if show_more:
+                show_more.click()
+                print("  已点击 Show more 按钮")
+                time.sleep(3)
+        except Exception:
+            print("  未找到 Show more 按钮，列表可能已展开，跳过")
+
+        # 步骤 4：下载当前页面自身的资源
+        print("[步骤4] 下载当前页面资源...")
+        go_to_resource_links = page.query_selector_all("a.resource-url-analytics")
+        print(f"  找到 {len(go_to_resource_links)} 个 Go to resource 链接")
+
+        for link in go_to_resource_links:
+            href = link.get_attribute("href")
+            if not href:
+                continue
+            if not href.startswith("http"):
+                href = urljoin(TARGET_URL, href)
+
+            # CSV 过滤
+            if not href.lower().endswith(".csv"):
+                print(f"  跳过非 CSV 文件: {href}")
+                continue
+
+            save_path = os.path.join(SAVE_DIR, "加拿大-招标-New tender notices.csv")
+            try:
+                print(f"  requests 下载: {href}")
+                original_name = download_with_requests(href, save_path)
+                print(f"  下载成功! 原始文件名: {original_name}")
+            except Exception as e:
+                print(f"  requests 下载失败: {e}, 尝试浏览器下载...")
+                try:
+                    with page.expect_download(timeout=120000) as download_info:
+                        link.click()
+                    download_info.value.save_as(save_path)
+                    print("  浏览器下载成功!")
+                except Exception as e2:
+                    print(f"  浏览器下载也失败: {e2}")
+
+        # 步骤 5：获取 Resources 列表中的全部资源链接
+        print("[步骤5] 获取 Resources 列表...")
+        resources_panel_selector = (
+            "#wb-auto-5 > aside > div > section > "
+            "div.panel-body.resources-side-panel.resources-side-panel-no-edit"
+        )
+        resource_links = []
+
+        try:
+            panel = page.wait_for_selector(resources_panel_selector, timeout=10000)
+            if panel:
+                links = panel.query_selector_all("a[href]")
+                for link in links:
+                    href = link.get_attribute("href")
+                    text = link.inner_text().strip()
+                    if not href:
+                        continue
+                    if not href.startswith("http"):
+                        href = urljoin(TARGET_URL, href)
+                    if "/resource/" not in href:
+                        continue
+                    text_lower = text.lower()
+                    skip = any(kw.lower() in text_lower for kw in EXCLUDE_KEYWORDS)
+                    if skip:
+                        print(f"  跳过: {text}")
+                        continue
+                    # 非全量模式下，只收集 "Open tender notices"
+                    if not full_mode and "open tender notices" not in text_lower:
+                        print(f"  跳过（非全量模式）: {text}")
+                        continue
+                    resource_links.append({"text": text, "href": href})
+                    print(f"  收集: {text}")
+        except Exception as e:
+            print(f"  面板选择器未找到: {e}，尝试备选方案...")
+            all_aside_links = page.query_selector_all("aside a[href*='/resource/']")
+            for link in all_aside_links:
+                href = link.get_attribute("href")
+                text = link.inner_text().strip()
+                if not href:
+                    continue
+                if not href.startswith("http"):
+                    href = urljoin(TARGET_URL, href)
+                skip = any(kw.lower() in text.lower() for kw in EXCLUDE_KEYWORDS)
+                if skip:
+                    continue
+                # 非全量模式下，只收集 "Open tender notices"
+                if not full_mode and "open tender notices" not in text.lower():
+                    continue
+                resource_links.append({"text": text, "href": href})
+
+        print(f"  共收集 {len(resource_links)} 个资源链接")
+
+        # 步骤 6：逐个访问资源页面并下载 CSV
+        print("\n[步骤6] 逐个下载资源 CSV...")
+        for i, res in enumerate(resource_links):
+            print(f"\n  处理 {i+1}/{len(resource_links)}: {res['text']}")
+            try:
+                page.goto(
+                    res["href"],
+                    wait_until="domcontentloaded",
+                    timeout=120000,
+                )
+                page.wait_for_load_state("load", timeout=60000)
+                time.sleep(2)
+
+                go_links = page.query_selector_all("a.resource-url-analytics")
+                for link in go_links:
+                    href = link.get_attribute("href")
+                    if not href:
+                        continue
+                    if not href.startswith("http"):
+                        href = urljoin(res["href"], href)
+
+                    # 支持多种格式
+                    lower_href = href.lower()
+                    if lower_href.endswith(".csv"):
+                        ext = "csv"
+                    elif lower_href.endswith(".xlsx"):
+                        ext = "xlsx"
+                    elif lower_href.endswith(".xls"):
+                        ext = "xls"
+                    else:
+                        continue  # 跳过其他格式
+
+                    resource_name = re.sub(
+                        r'[<>:"/\\|?*]', "_", res["text"].strip()
+                    )
+                    new_filename = f"加拿大-招标-{resource_name}.{ext}"
+                    save_path = os.path.join(SAVE_DIR, new_filename)
+
+                    try:
+                        download_with_requests(href, save_path)
+                        print(f"    下载成功: {new_filename}")
+                    except Exception as e:
+                        print(f"    requests 失败: {e}")
+                        try:
+                            with page.expect_download(timeout=60000) as download_info:
+                                link.click()
+                            download_info.value.save_as(save_path)
+                            print(f"    浏览器下载成功: {new_filename}")
+                        except Exception as e2:
+                            print(f"    浏览器下载也失败: {e2}")
+            except Exception as e:
+                print(f"    访问资源页面失败: {e}")
+
+        browser.close()
+
+    # ====== 阶段二：上传到 Gofile ======
+
+    print("\n[步骤7] 上传文件到 Gofile.io...")
+    token, root_folder = create_gofile_account()
+    print(f"  Gofile 账户已创建")
+
+    files = sorted(
+        [
+            (f, os.path.getsize(os.path.join(SAVE_DIR, f)))
+            for f in os.listdir(SAVE_DIR)
+            if os.path.isfile(os.path.join(SAVE_DIR, f))
+        ],
+        key=lambda x: x[1],  # 小文件先上传
+    )
+
+    upload_results = []
+    for filename, filesize in files:
+        filepath = os.path.join(SAVE_DIR, filename)
+        try:
+            result = upload_to_gofile(filepath, token, root_folder)
+            upload_results.append(result)
+        except Exception as e:
+            print(f"  上传失败: {filename} - {e}")
+
+    # 关键：设置文件夹公开访问
+    print("\n  设置文件夹为公开访问...")
+    set_gofile_folder_public(root_folder, token)
+    print("  文件夹已设为公开")
+
+    # ====== 阶段三：发送邮件 ======
+
+    print("\n[步骤8] 发送邮件...")
+    download_page = upload_results[0]["downloadPage"] if upload_results else "N/A"
+
+    email_body = f"加拿大开放数据平台 - 招标数据下载链接\n{'='*60}\n\n"
+    email_body += f"Gofile 下载页面：{download_page}\n\n文件列表：\n\n"
+    for i, r in enumerate(upload_results, 1):
+        email_body += f"  {i}. {r['filename']} ({r['size']/1024/1024:.1f} MB)\n"
+    email_body += f"\n{'='*60}\n数据来源: 加拿大开放数据平台 (open.canada.ca)\n"
+
+    try:
+        send_email(
+            subject="加拿大开放数据平台 - 招标数据 Gofile 下载链接",
+            body=email_body,
+            sender=sender,
+            auth_code=auth_code,
+            recipient=recipient,
+        )
+        print("  邮件发送成功!")
+    except Exception as e:
+        print(f"  邮件发送失败: {e}")
+
+    # ====== 汇总 ======
+
+    print(f"\n{'='*60}")
+    print(f"完成! 共下载 {len(files)} 个文件，上传 {len(upload_results)} 个")
+    print(f"Gofile 链接: {download_page}")
+    print(f"保存目录: {SAVE_DIR}")
+
+
+if __name__ == "__main__":
+    main()
