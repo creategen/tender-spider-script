@@ -755,13 +755,21 @@ def main(max_pages=2, sender=None, auth_code=None, receiver=None):
                     print("  下一页按钮已禁用，爬取结束。")
                     break
 
-                # 点击翻页（使用 expect_navigation 等待页面导航完成）
+                # 获取下一页链接并直接跳转（避免 AJAX 翻页导致 expect_navigation 超时）
                 next_link = next_button.query_selector("a")
-                click_target = next_link if next_link else next_button
+                if next_link:
+                    next_href = next_link.get_attribute("href")
+                    if next_href and not next_href.startswith("http"):
+                        next_href = BASE_URL + next_href
+                else:
+                    next_href = None
 
-                print("  点击下一页按钮...")
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=120000):
-                    click_target.click()
+                if not next_href:
+                    print("  未找到下一页链接，爬取结束。")
+                    break
+
+                print(f"  跳转到下一页: {next_href}")
+                page.goto(next_href, wait_until="domcontentloaded", timeout=120000)
 
                 # 等待列表容器出现
                 try:
