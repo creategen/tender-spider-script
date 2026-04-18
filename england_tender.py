@@ -444,29 +444,51 @@ def extract_detail(url):
 
 # ==================== 列表页链接收集 ====================
 
-def collect_page_links(page):
+def collect_page_links(page, max_retries=3):
     """
     从当前列表页收集所有文章的详情页 URL。
     仅收集链接，不点击进入详情页，避免 DOM 引用失效。
+    增加重试机制处理页面加载超时问题。
     """
-    page.wait_for_selector(LIST_SELECTOR, timeout=60000)
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            # 等待列表容器出现
+            page.wait_for_selector(LIST_SELECTOR, timeout=60000)
+            
+            # 额外等待确保内容完全加载
+            page.wait_for_timeout(2000)
 
-    # 用 JavaScript 一次性提取所有链接，避免逐个查询 DOM 元素
-    links = page.evaluate("""() => {
-        const items = document.querySelectorAll('#dashboard_notices > div.gadget-body .search-result h2 a');
-        return Array.from(items).map(a => a.href);
-    }""")
+            # 用 JavaScript 一次性提取所有链接，避免逐个查询 DOM 元素
+            links = page.evaluate("""() => {
+                const items = document.querySelectorAll('#dashboard_notices > div.gadget-body .search-result h2 a');
+                return Array.from(items).map(a => a.href);
+            }""")
 
-    # 过滤并补全 URL
-    result = []
-    for href in links:
-        if not href:
-            continue
-        if href.startswith("/"):
-            href = BASE_URL + href
-        result.append(href)
+            # 过滤并补全 URL
+            result = []
+            for href in links:
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    href = BASE_URL + href
+                result.append(href)
 
-    return result
+            return result
+
+        except Exception as e:
+            last_error = e
+            retry_count += 1
+            if retry_count < max_retries:
+                print(f"  [警告] 收集链接失败，第 {retry_count}/{max_retries-1} 次重试...")
+                page.wait_for_timeout(3000)
+            else:
+                print(f"  [错误] 收集链接失败，已重试 {max_retries} 次: {e}")
+                raise
+
+    raise last_error
 
 
 # ==================== Gofile 上传 ====================
@@ -670,8 +692,18 @@ def main(max_pages=2, sender=None, auth_code=None, receiver=None):
             print(f"\n--- 正在处理第 {page_num} 页 ---")
 
             # 收集当前页所有详情页链接
-            detail_urls = collect_page_links(page)
-            print(f"  本页找到 {len(detail_urls)} 个列表项")
+            try:
+                detail_urls = collect_page_links(page)
+                print(f"  本页找到 {len(detail_urls)} 个列表项")
+            except Exception as e:
+                print(f"  [错误] 第 {page_num} 页收集链接失败: {e}")
+                print(f"  [提示] 可能已到达最后一页或页面结构发生变化")
+                break
+
+            # 如果本页没有找到链接，可能是页面结构变化或已结束
+            if not detail_urls:
+                print(f"  [警告] 第 {page_num} 页未找到任何链接，爬取结束。")
+                break
 
             # 逐个用 requests 请求详情页并提取数据
             for idx, detail_url in enumerate(detail_urls):
@@ -723,19 +755,28 @@ def main(max_pages=2, sender=None, auth_code=None, receiver=None):
                     print("  下一页按钮已禁用，爬取结束。")
                     break
 
-                # 点击翻页
+                # 点击翻页（使用 expect_navigation 等待页面导航完成）
                 next_link = next_button.query_selector("a")
                 click_target = next_link if next_link else next_button
 
                 print("  点击下一页按钮...")
-                click_target.click()
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=120000):
+                    click_target.click()
 
-                # 等待页面刷新
-                page.wait_for_timeout(3000)
+                # 等待列表容器出现
                 try:
-                    page.wait_for_selector(LIST_SELECTOR, timeout=30000)
-                except Exception:
+                    page.wait_for_selector(LIST_SELECTOR, timeout=60000)
+                    print("  页面加载完成")
+                except Exception as e:
+                    print(f"  [警告] 页面加载超时: {e}")
+                    # 尝试再次等待
                     page.wait_for_timeout(5000)
+                    try:
+                        page.wait_for_selector(LIST_SELECTOR, timeout=60000)
+                        print("  页面二次加载完成")
+                    except Exception:
+                        print("  [错误] 页面加载失败，爬取结束。")
+                        break
 
                 page_num += 1
 
