@@ -28,7 +28,7 @@ python england_tender.py --max-pages 5
 python england_tender.py --max-pages full
 
 # 带邮件发送（爬取前3页）
-python england_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com --max-pages 3
+python england_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com --max-pages 3 --start-page 27
 """
 
 import argparse
@@ -455,11 +455,11 @@ def collect_page_links(page, max_retries=3):
     
     while retry_count < max_retries:
         try:
-            # 等待列表容器出现
-            page.wait_for_selector(LIST_SELECTOR, timeout=60000)
-            
+            # 等待列表容器出现（增加超时时间）
+            page.wait_for_selector(LIST_SELECTOR, timeout=90000)
+
             # 额外等待确保内容完全加载
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
 
             # 用 JavaScript 一次性提取所有链接，避免逐个查询 DOM 元素
             links = page.evaluate("""() => {
@@ -482,7 +482,7 @@ def collect_page_links(page, max_retries=3):
             last_error = e
             retry_count += 1
             if retry_count < max_retries:
-                print(f"  [警告] 收集链接失败，第 {retry_count}/{max_retries-1} 次重试...")
+                print(f"  [警告] 收集链接失败，第 {retry_count}/{max_retries} 次重试...")
                 page.wait_for_timeout(3000)
             else:
                 print(f"  [错误] 收集链接失败，已重试 {max_retries} 次: {e}")
@@ -637,11 +637,12 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
 
 # ==================== 主流程 ====================
 
-def main(max_pages=2, sender=None, auth_code=None, receiver=None):
+def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
     """
     主流程。
     max_pages: 最大爬取页数，默认 2 页。
                可以是数字 n（爬取前 n 页）或 "full"（爬取全部页）。
+    start_page: 起始页码，默认 1。
     sender/auth_code/receiver: 邮件参数，全部非空时上传并发送邮件。
     """
     print("=" * 60)
@@ -649,6 +650,8 @@ def main(max_pages=2, sender=None, auth_code=None, receiver=None):
     print(f"目标网址: {TARGET_URL}")
     print(f"保存目录: {SAVE_DIR}")
     print(f"分批保存: 每 {BATCH_SIZE} 条")
+    if start_page > 1:
+        print(f"起始页码: 第 {start_page} 页")
     if max_pages == "full":
         print("模式: 爬取全部页数据")
     elif max_pages > 0:
@@ -687,7 +690,23 @@ def main(max_pages=2, sender=None, auth_code=None, receiver=None):
         page.wait_for_load_state("load", timeout=60000)
         print("  页面加载完成")
 
-        page_num = 1
+        # 如果指定了起始页码大于1，则跳转到指定页
+        if start_page > 1:
+            print(f"  跳转到第 {start_page} 页...")
+            jump_url = f"{TARGET_URL}?&page={start_page}#dashboard_notices"
+            try:
+                page.goto(jump_url, wait_until="domcontentloaded", timeout=120000)
+                page.wait_for_selector(LIST_SELECTOR, timeout=60000)
+                print(f"  已跳转到第 {start_page} 页")
+            except Exception as e:
+                print(f"  [警告] 跳转到第 {start_page} 页失败: {e}")
+                print("  将从第 1 页开始爬取")
+                start_page = 1
+                page_num = 1
+            else:
+                page_num = start_page
+        else:
+            page_num = 1
         while True:
             print(f"\n--- 正在处理第 {page_num} 页 ---")
 
@@ -737,6 +756,8 @@ def main(max_pages=2, sender=None, auth_code=None, receiver=None):
 
             # 尝试翻页
             try:
+                # 翻页前等待，避免请求过快触发限流
+                page.wait_for_timeout(5000)
                 next_button = page.query_selector(NEXT_PAGE_SELECTOR)
                 if not next_button:
                     print("  未找到下一页按钮，爬取结束。")
@@ -769,22 +790,59 @@ def main(max_pages=2, sender=None, auth_code=None, receiver=None):
                     break
 
                 print(f"  跳转到下一页: {next_href}")
-                page.goto(next_href, wait_until="domcontentloaded", timeout=120000)
 
-                # 等待列表容器出现
-                try:
-                    page.wait_for_selector(LIST_SELECTOR, timeout=60000)
-                    print("  页面加载完成")
-                except Exception as e:
-                    print(f"  [警告] 页面加载超时: {e}")
-                    # 尝试再次等待
-                    page.wait_for_timeout(5000)
+                # 翻页重试计数
+                nav_retry_count = 0
+                nav_max_retries = 2
+                page_loaded = False
+                
+                while nav_retry_count <= nav_max_retries:
                     try:
-                        page.wait_for_selector(LIST_SELECTOR, timeout=60000)
-                        print("  页面二次加载完成")
-                    except Exception:
-                        print("  [错误] 页面加载失败，爬取结束。")
-                        break
+                        # 尝试直接跳转
+                        try:
+                            page.goto(next_href, wait_until="domcontentloaded", timeout=120000)
+                        except Exception:
+                            print("  [警告] 第一次跳转超时，尝试延长等待...")
+                            try:
+                                page.goto(next_href, wait_until="domcontentloaded", timeout=180000)
+                            except Exception:
+                                if nav_retry_count < nav_max_retries:
+                                    print(f"  [警告] 跳转失败，第 {nav_retry_count + 1}/{nav_max_retries} 次重试...")
+                                    page.wait_for_timeout(5000)
+                                    nav_retry_count += 1
+                                    continue
+                                else:
+                                    print(f"  [错误] 跳转失败，已重试 {nav_max_retries} 次")
+                                    break
+                        
+                        # 等待列表容器出现
+                        try:
+                            page.wait_for_selector(LIST_SELECTOR, timeout=90000)
+                            print("  页面加载完成")
+                            page_loaded = True
+                            break
+                        except Exception:
+                            if nav_retry_count < nav_max_retries:
+                                print(f"  [警告] 页面加载超时，第 {nav_retry_count + 1}/{nav_max_retries} 次重试...")
+                                page.wait_for_timeout(10000)
+                                nav_retry_count += 1
+                            else:
+                                print(f"  [错误] 页面加载失败，已重试 {nav_max_retries} 次")
+                                break
+                                
+                    except Exception as e:
+                        if nav_retry_count < nav_max_retries:
+                            print(f"  [警告] 翻页异常，第 {nav_retry_count + 1}/{nav_max_retries} 次重试... {e}")
+                            page.wait_for_timeout(5000)
+                            nav_retry_count += 1
+                        else:
+                            print(f"  [错误] 翻页失败，已重试 {nav_max_retries} 次: {e}")
+                            break
+                
+                if not page_loaded:
+                    print(f"  [提示] 第 {page_num} 页翻页失败，跳过该页继续爬取后续页面")
+                    page_num += 1
+                    continue
 
                 page_num += 1
 
@@ -854,6 +912,10 @@ if __name__ == "__main__":
         "--max-pages", required=False, default="2",
         help="最大爬取页数，默认 2 页。可以是数字 n（爬取前 n 页）或 'full'（爬取全部页）"
     )
+    parser.add_argument(
+        "--start-page", required=False, default="1",
+        help="起始页码，默认 1。从指定页码开始爬取"
+    )
     args = parser.parse_args()
 
     # 解析 max_pages 参数
@@ -867,4 +929,15 @@ if __name__ == "__main__":
             print(f"警告: --max-pages 参数无效 '{args.max_pages}'，使用默认值 2")
             max_pages = 2
 
-    main(sender=args.sender, auth_code=args.auth_code, receiver=args.receiver, max_pages=max_pages)
+    # 解析 start_page 参数
+    start_page_arg = args.start_page
+    try:
+        start_page = int(start_page_arg)
+        if start_page < 1:
+            print(f"警告: --start-page 参数无效 '{args.start_page}'，使用默认值 1")
+            start_page = 1
+    except ValueError:
+        print(f"警告: --start-page 参数无效 '{args.start_page}'，使用默认值 1")
+        start_page = 1
+
+    main(sender=args.sender, auth_code=args.auth_code, receiver=args.receiver, max_pages=max_pages, start_page=start_page)
