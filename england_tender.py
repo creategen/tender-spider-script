@@ -59,8 +59,8 @@ USER_AGENT = (
 )
 BATCH_SIZE = 10000  # 每 10000 条保存一次
 REQUEST_DELAY = 1.5  # 每次详情页请求间隔（秒），防止 429
-MAX_RETRIES = 1      # 429 重试最大次数，如重试三次：3
-RETRY_DELAYS = [125]  # 每次重试的等待时间（秒），如重试三次： [70, 130, 130]
+MAX_RETRIES = 3      # 429 重试最大次数
+RETRY_DELAYS = [121,121,0]  # 每次重试的等待时间（秒），如重试2次为[121,121,0]，多一个数字是为了让本次等待完成后执行
 
 # 保存目录
 SAVE_DIR = os.path.join(os.getcwd(), "英国招标")
@@ -250,7 +250,7 @@ def fetch_detail_page(url):
         except requests.exceptions.HTTPError as e:
             if response.status_code == 429:
                 wait_time = RETRY_DELAYS[attempt]
-                print(f"    [429] 请求过快，第 {attempt + 1}/{MAX_RETRIES} 次重试，等待 {wait_time}s...")
+                print(f"    [429] 请求过快，第 {attempt + 1}/{MAX_RETRIES-1} 次重试，等待 {wait_time}s...")
                 time.sleep(wait_time)
                 if attempt == MAX_RETRIES - 1:
                     raise
@@ -258,7 +258,7 @@ def fetch_detail_page(url):
                 raise
         except requests.exceptions.ConnectionError:
             wait_time = RETRY_DELAYS[attempt]
-            print(f"    [连接错误] 第 {attempt + 1}/{MAX_RETRIES} 次重试，等待 {wait_time}s...")
+            print(f"    [连接错误] 第 {attempt + 1}/{MAX_RETRIES-1} 次重试，等待 {wait_time}s...")
             time.sleep(wait_time)
             if attempt == MAX_RETRIES - 1:
                 raise
