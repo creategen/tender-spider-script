@@ -641,7 +641,8 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
     """
     主流程。
     max_pages: 最大爬取页数，默认 2 页。
-               可以是数字 n（爬取前 n 页）或 "full"（爬取全部页）。
+               从 start_page 开始计算，爬取 max_pages 页。
+               可以是数字 n（从 start_page 开始爬取 n 页）或 "full"（爬取全部页）。
     start_page: 起始页码，默认 1。
     sender/auth_code/receiver: 邮件参数，全部非空时上传并发送邮件。
     """
@@ -655,9 +656,10 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
     if max_pages == "full":
         print("模式: 爬取全部页数据")
     elif max_pages > 0:
-        print(f"测试模式: 仅爬取前 {max_pages} 页")
+        end_page = start_page + max_pages - 1
+        print(f"爬取范围: 第 {start_page} 页到第 {end_page} 页（共 {max_pages} 页）")
     else:
-        print(f"默认模式: 爬取前 {max_pages} 页")
+        print(f"默认模式: 从第 {start_page} 页开始爬取")
     print("=" * 60)
 
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -667,6 +669,11 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
     file_index = 0      # 文件序号
     saved_files = []    # 所有已保存的 Excel 文件路径
     saved_records = []  # 每个文件对应的记录数
+    
+    # 计算结束页码
+    end_page = None
+    if max_pages != "full" and max_pages > 0:
+        end_page = start_page + max_pages - 1
 
     with sync_playwright() as p:
         # 启动浏览器
@@ -755,6 +762,11 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
                     continue
 
             # 尝试翻页
+            # 先检查是否达到最大页数
+            if end_page is not None and page_num >= end_page:
+                print(f"  已达测试页数限制 (从第 {start_page} 页开始，共 {max_pages} 页，结束于第 {end_page} 页)，爬取结束。")
+                break
+            
             try:
                 # 翻页前等待，避免请求过快触发限流
                 page.wait_for_timeout(5000)
@@ -847,8 +859,8 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
                 page_num += 1
 
                 # 检查是否达到最大页数
-                if max_pages != "full" and max_pages > 0 and page_num > max_pages:
-                    print(f"  已达测试页数限制 ({max_pages} 页)，爬取结束。")
+                if end_page is not None and page_num > end_page:
+                    print(f"  已达测试页数限制 (从第 {start_page} 页开始，共 {max_pages} 页，结束于第 {end_page} 页)，爬取结束。")
                     break
 
             except Exception as e:
