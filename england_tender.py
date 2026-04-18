@@ -18,7 +18,17 @@
   - 上传至 Gofile.io 并发送下载链接邮件
 
 用法:
-  python england_tender.py --sender 发件邮箱 --auth-code 授权码 --receiver 收件邮箱
+# 默认：爬取前2页
+python england_tender.py
+
+# 爬取前5页
+python england_tender.py --max-pages 5
+
+# 爬取全部页
+python england_tender.py --max-pages full
+
+# 带邮件发送（爬取前3页）
+python england_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com --max-pages 3
 """
 
 import argparse
@@ -605,10 +615,11 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
 
 # ==================== 主流程 ====================
 
-def main(max_pages=0, sender=None, auth_code=None, receiver=None):
+def main(max_pages=2, sender=None, auth_code=None, receiver=None):
     """
     主流程。
-    max_pages: 最大爬取页数，0 表示爬取全部。
+    max_pages: 最大爬取页数，默认 2 页。
+               可以是数字 n（爬取前 n 页）或 "full"（爬取全部页）。
     sender/auth_code/receiver: 邮件参数，全部非空时上传并发送邮件。
     """
     print("=" * 60)
@@ -616,8 +627,12 @@ def main(max_pages=0, sender=None, auth_code=None, receiver=None):
     print(f"目标网址: {TARGET_URL}")
     print(f"保存目录: {SAVE_DIR}")
     print(f"分批保存: 每 {BATCH_SIZE} 条")
-    if max_pages > 0:
+    if max_pages == "full":
+        print("模式: 爬取全部页数据")
+    elif max_pages > 0:
         print(f"测试模式: 仅爬取前 {max_pages} 页")
+    else:
+        print(f"默认模式: 爬取前 {max_pages} 页")
     print("=" * 60)
 
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -725,7 +740,7 @@ def main(max_pages=0, sender=None, auth_code=None, receiver=None):
                 page_num += 1
 
                 # 检查是否达到最大页数
-                if max_pages > 0 and page_num > max_pages:
+                if max_pages != "full" and max_pages > 0 and page_num > max_pages:
                     print(f"  已达测试页数限制 ({max_pages} 页)，爬取结束。")
                     break
 
@@ -786,6 +801,21 @@ if __name__ == "__main__":
         "--receiver", required=False, default=None,
         help="收件邮箱"
     )
+    parser.add_argument(
+        "--max-pages", required=False, default="2",
+        help="最大爬取页数，默认 2 页。可以是数字 n（爬取前 n 页）或 'full'（爬取全部页）"
+    )
     args = parser.parse_args()
 
-    main(sender=args.sender, auth_code=args.auth_code, receiver=args.receiver)
+    # 解析 max_pages 参数
+    max_pages_arg = args.max_pages
+    if max_pages_arg.lower() == "full":
+        max_pages = "full"
+    else:
+        try:
+            max_pages = int(max_pages_arg)
+        except ValueError:
+            print(f"警告: --max-pages 参数无效 '{args.max_pages}'，使用默认值 2")
+            max_pages = 2
+
+    main(sender=args.sender, auth_code=args.auth_code, receiver=args.receiver, max_pages=max_pages)
