@@ -3,7 +3,7 @@
 加拿大开放数据平台 — 招标数据爬取、上传与邮件通知
 
 用法:
-  python3 canada_tender.py --sender 发件邮箱 --auth-code 授权码 --recipient 收件邮箱 [--full]
+  python3 canada_tender.py --sender 发件邮箱 --auth-code 授权码 --receiver 收件邮箱 [--full]
 
   不传 --full 时，仅下载 "New tender notices" 和 "Open tender notices" 两份 CSV；
   传入 --full 时，爬取全量资源。
@@ -16,6 +16,7 @@ import smtplib
 import sys
 import time
 import requests
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urljoin, urlparse
@@ -130,17 +131,90 @@ def set_gofile_folder_public(folder_id, token):
     return resp.json()
 
 
-def send_email(subject, body, sender, auth_code, recipient):
-    """通过 QQ 邮箱 SMTP 发送邮件"""
-    msg = MIMEMultipart()
+def send_email(subject, sender, auth_code, recipient, download_link, upload_results):
+    """发送包含下载链接的邮件（HTML格式）"""
+    print(f"\n发送邮件到 {recipient}...")
+
+    # 文件清单表格行
+    file_rows_html = ""
+    file_rows_text = ""
+    for i, r in enumerate(upload_results, 1):
+        bg = "#f2f2f2" if i % 2 == 1 else "#ffffff"
+        file_rows_html += f"""<tr style="background-color: {bg};">
+<td style="border: 1px solid #ddd; padding: 10px;">{i}</td>
+<td style="border: 1px solid #ddd; padding: 10px;">{r['filename']}</td>
+<td style="border: 1px solid #ddd; padding: 10px;">{r['size']/1024/1024:.1f} MB</td></tr>
+"""
+        file_rows_text += f"{i}. {r['filename']} ({r['size']/1024/1024:.1f} MB)\n"
+
+    now_str = datetime.now().strftime('%Y年%m月%d日')
+
+    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
+<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px;">加拿大开放数据平台 - 招标数据爬取结果</h2>
+<div style="background-color: #eaf2f8; padding: 15px; border-radius: 5px; margin: 15px 0;">
+<strong>爬取时间：</strong>{now_str}<br>
+<strong>数据来源：</strong>https://open.canada.ca<br>
+<strong>总计：</strong>{len(upload_results)}个文件
+</div>
+<h3>下载链接</h3>
+<div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 20px; border-radius: 5px; text-align: center; margin: 15px 0;">
+<a href="{download_link}" style="font-size: 18px; color: #2980b9; font-weight: bold; text-decoration: none;">点击下载全部文件</a>
+<br><span style="color: #888; font-size: 13px;">{download_link}</span>
+<br><span style="color: #666; font-size: 12px;">（{len(upload_results)}个文件均在同一目录下，可逐个下载）</span>
+</div>
+<h3>文件清单</h3>
+<table style="border-collapse: collapse; width: 100%;">
+<tr style="background-color: #2980b9; color: white;"><th style="padding: 10px; text-align: left;">序号</th><th style="padding: 10px; text-align: left;">文件名</th><th style="padding: 10px; text-align: left;">大小</th></tr>
+{file_rows_html}
+</table>
+<div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+<strong style="color: #721c24;">提醒：Gofile.io 链接有效期有限，建议尽快下载。</strong>
+</div>
+<p style="color:#888; font-size:12px; margin-top:20px;">此邮件由自动化爬取系统发送，请勿直接回复。</p>
+</body></html>"""
+
+    text_body = f"""加拿大开放数据平台 - 招标数据爬取结果
+
+爬取时间：{now_str}
+数据来源：https://open.canada.ca
+总计：{len(upload_results)}个文件
+
+下载链接（{len(upload_results)}个文件在同一目录下，可逐个下载）：
+{download_link}
+
+文件清单：
+{file_rows_text}
+提醒：Gofile.io 链接有效期有限，建议尽快下载。
+"""
+
+    msg = MIMEMultipart("alternative")
     msg["From"] = sender
     msg["To"] = recipient
     msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        server = smtplib.SMTP_SSL("smtp.qq.com", 465)
         server.login(sender, auth_code)
         server.sendmail(sender, recipient, msg.as_string())
+        server.quit()
+        print("  ✓ 邮件发送成功！")
+        return True
+    except Exception as e:
+        # 尝试TLS方式
+        try:
+            server = smtplib.SMTP("smtp.qq.com", 587)
+            server.starttls()
+            server.login(sender, auth_code)
+            server.sendmail(sender, recipient, msg.as_string())
+            server.quit()
+            print("  ✓ 邮件发送成功(TLS)！")
+            return True
+        except Exception as e2:
+            print(f"  ✗ 邮件发送失败: {e2}")
+            return False
 
 
 # ==================== 主流程 ====================
@@ -157,7 +231,7 @@ def main():
         "--auth-code", required=True, help="发件邮箱 SMTP 授权码"
     )
     parser.add_argument(
-        "--recipient", required=True, help="收件邮箱"
+        "--receiver", required=True, help="收件邮箱"
     )
     parser.add_argument(
         "--full", action="store_true", default=False,
@@ -167,7 +241,7 @@ def main():
 
     sender = args.sender
     auth_code = args.auth_code
-    recipient = args.recipient
+    recipient = args.receiver
     full_mode = args.full
 
     if full_mode:
@@ -389,21 +463,15 @@ def main():
     print("\n[步骤8] 发送邮件...")
     download_page = upload_results[0]["downloadPage"] if upload_results else "N/A"
 
-    email_body = f"加拿大开放数据平台 - 招标数据下载链接\n{'='*60}\n\n"
-    email_body += f"Gofile 下载页面：{download_page}\n\n文件列表：\n\n"
-    for i, r in enumerate(upload_results, 1):
-        email_body += f"  {i}. {r['filename']} ({r['size']/1024/1024:.1f} MB)\n"
-    email_body += f"\n{'='*60}\n数据来源: 加拿大开放数据平台 (open.canada.ca)\n"
-
     try:
         send_email(
             subject="加拿大开放数据平台 - 招标数据 Gofile 下载链接",
-            body=email_body,
             sender=sender,
             auth_code=auth_code,
             recipient=recipient,
+            download_link=download_page,
+            upload_results=upload_results,
         )
-        print("  邮件发送成功!")
     except Exception as e:
         print(f"  邮件发送失败: {e}")
 

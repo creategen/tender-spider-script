@@ -36,7 +36,7 @@ import os
 import smtplib
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib3.exceptions import InsecureRequestWarning
@@ -231,7 +231,9 @@ def save_to_excel(batch_data, file_index):
     ws.freeze_panes = "A3"
 
     # --- 保存文件 ---
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    # 使用东八区时间
+    tz_beijing = timezone(timedelta(hours=8))
+    timestamp = datetime.now(tz_beijing).strftime("%Y-%m-%d-%H-%M-%S")
     os.makedirs(SAVE_DIR, exist_ok=True)
     file_name = f"英国-招标-{timestamp}.xlsx"
     file_path = os.path.join(SAVE_DIR, file_name)
@@ -579,7 +581,7 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
 """
         file_rows_text += f"{i}. {info['filename']} ({info['records']}条)\n"
 
-    now_str = datetime.now().strftime('%Y-%m-%d')
+    now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
     total_records = sum(f['records'] for f in file_info_list)
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
