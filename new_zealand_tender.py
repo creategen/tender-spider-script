@@ -23,7 +23,7 @@ import smtplib
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -355,7 +355,9 @@ def scrape_category(site_config, progress_file):
 
     # 生成Excel
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    now = datetime.now()
+    # 使用东八区时间
+    tz_beijing = timezone(timedelta(hours=8))
+    now = datetime.now(tz_beijing)
     timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
     filename = f"新西兰-{category}-{timestamp}.xlsx"
     output_path = os.path.join(OUTPUT_DIR, filename)
@@ -466,7 +468,7 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
 """
         file_rows_text += f"{i}. {info['filename']} ({info['category']}, {info['records']}条)\n"
 
-    now_str = datetime.now().strftime('%Y年%m月%d日')
+    now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y年%m月%d日')
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
 <h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px;">新西兰 GETS 政府招标网站爬取结果</h2>
