@@ -57,6 +57,8 @@ urllib3.disable_warnings(InsecureRequestWarning)
 TARGET_URL = "https://www.contractsfinder.service.gov.uk/Search/Results"
 BASE_URL = "https://www.contractsfinder.service.gov.uk"
 LIST_SELECTOR = "#dashboard_notices > div.gadget-body"
+# 等待搜索结果出现的选择器（更精确地等待内容加载完成）
+SEARCH_RESULT_SELECTOR = "#dashboard_notices .search-result"
 NEXT_PAGE_SELECTOR = (
     "#dashboard_notices > div.gadget-footer > ul > "
     "li.standard-paginate-next-box.standard-paginate-next-icon"
@@ -69,8 +71,8 @@ USER_AGENT = (
 )
 BATCH_SIZE = 10000  # 每 10000 条保存一次
 REQUEST_DELAY = 1.5  # 每次详情页请求间隔（秒），防止 429
-MAX_RETRIES = 3      # 429 重试最大次数，3其实为重试2次
-RETRY_DELAYS = [121,121,0]  # 每次重试的等待时间（秒），如重试2次为[121,121,0]，多一个数字是为了让本次等待完成后执行
+MAX_RETRIES = 3      # 429 重试最大次数
+RETRY_DELAYS = [121, 121, 121]  # 每次重试的等待时间（秒），递增等待策略
 
 # 保存目录
 SAVE_DIR = os.path.join(os.getcwd(), "英国招标")
@@ -261,7 +263,7 @@ def fetch_detail_page(url):
             break
         except requests.exceptions.HTTPError as e:
             if response.status_code == 429:
-                wait_time = RETRY_DELAYS[attempt]
+                wait_time = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
                 print(f"    [429] 请求过快，第 {attempt + 1}/{MAX_RETRIES-1} 次重试，等待 {wait_time}s...")
                 time.sleep(wait_time)
                 if attempt == MAX_RETRIES - 1:
@@ -269,8 +271,14 @@ def fetch_detail_page(url):
             else:
                 raise
         except requests.exceptions.ConnectionError:
-            wait_time = RETRY_DELAYS[attempt]
+            wait_time = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
             print(f"    [连接错误] 第 {attempt + 1}/{MAX_RETRIES-1} 次重试，等待 {wait_time}s...")
+            time.sleep(wait_time)
+            if attempt == MAX_RETRIES - 1:
+                raise
+        except requests.exceptions.Timeout:
+            wait_time = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+            print(f"    [超时] 第 {attempt + 1}/{MAX_RETRIES-1} 次重试，等待 {wait_time}s...")
             time.sleep(wait_time)
             if attempt == MAX_RETRIES - 1:
                 raise
@@ -454,20 +462,35 @@ def collect_page_links(page, max_retries=3):
     """
     retry_count = 0
     last_error = None
-    
+
     while retry_count < max_retries:
         try:
-            # 等待列表容器出现（增加超时时间）
-            page.wait_for_selector(LIST_SELECTOR, timeout=90000)
+            # 等待搜索结果出现（比等容器更可靠，确保内容已加载）
+            try:
+                page.wait_for_selector(SEARCH_RESULT_SELECTOR, timeout=60000)
+            except Exception:
+                # 回退：等待容器出现
+                page.wait_for_selector(LIST_SELECTOR, timeout=30000)
 
             # 额外等待确保内容完全加载
             page.wait_for_timeout(3000)
 
             # 用 JavaScript 一次性提取所有链接，避免逐个查询 DOM 元素
             links = page.evaluate("""() => {
-                const items = document.querySelectorAll('#dashboard_notices > div.gadget-body .search-result h2 a');
+                const items = document.querySelectorAll('#dashboard_notices .search-result h2 a');
                 return Array.from(items).map(a => a.href);
             }""")
+
+            # 如果没有找到链接，可能是页面还没完全加载，重试
+            if not links:
+                retry_count += 1
+                if retry_count < max_retries:
+                    print(f"  [警告] 未找到链接（可能页面未完全加载），第 {retry_count}/{max_retries} 次重试...")
+                    page.wait_for_timeout(5000)
+                    continue
+                else:
+                    print(f"  [错误] 多次重试仍未找到链接")
+                    return []
 
             # 过滤并补全 URL
             result = []
@@ -485,7 +508,7 @@ def collect_page_links(page, max_retries=3):
             retry_count += 1
             if retry_count < max_retries:
                 print(f"  [警告] 收集链接失败，第 {retry_count}/{max_retries} 次重试...")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(5000)
             else:
                 print(f"  [错误] 收集链接失败，已重试 {max_retries} 次: {e}")
                 raise
@@ -807,43 +830,45 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
 
                 # 翻页重试计数
                 nav_retry_count = 0
-                nav_max_retries = 2
+                nav_max_retries = 3
                 page_loaded = False
-                
+
                 while nav_retry_count <= nav_max_retries:
                     try:
-                        # 尝试直接跳转
+                        # 直接跳转到下一页URL
+                        page.goto(next_href, wait_until="domcontentloaded", timeout=120000)
+
+                        # 等待搜索结果出现（比等容器更可靠）
                         try:
-                            page.goto(next_href, wait_until="domcontentloaded", timeout=120000)
-                        except Exception:
-                            print("  [警告] 第一次跳转超时，尝试延长等待...")
-                            try:
-                                page.goto(next_href, wait_until="domcontentloaded", timeout=180000)
-                            except Exception:
-                                if nav_retry_count < nav_max_retries:
-                                    print(f"  [警告] 跳转失败，第 {nav_retry_count + 1}/{nav_max_retries} 次重试...")
-                                    page.wait_for_timeout(5000)
-                                    nav_retry_count += 1
-                                    continue
-                                else:
-                                    print(f"  [错误] 跳转失败，已重试 {nav_max_retries} 次")
-                                    break
-                        
-                        # 等待列表容器出现
-                        try:
-                            page.wait_for_selector(LIST_SELECTOR, timeout=90000)
+                            page.wait_for_selector(SEARCH_RESULT_SELECTOR, timeout=60000)
                             print("  页面加载完成")
                             page_loaded = True
                             break
                         except Exception:
+                            # 搜索结果未出现，尝试等容器
+                            try:
+                                page.wait_for_selector(LIST_SELECTOR, timeout=30000)
+                                # 容器出现了但可能内容为空，再等等
+                                page.wait_for_timeout(5000)
+                                # 再次检查搜索结果
+                                result_count = page.evaluate("""() => {
+                                    return document.querySelectorAll('#dashboard_notices .search-result').length;
+                                }""")
+                                if result_count > 0:
+                                    print("  页面加载完成")
+                                    page_loaded = True
+                                    break
+                            except Exception:
+                                pass
+
                             if nav_retry_count < nav_max_retries:
                                 print(f"  [警告] 页面加载超时，第 {nav_retry_count + 1}/{nav_max_retries} 次重试...")
-                                page.wait_for_timeout(10000)
+                                page.wait_for_timeout(5000)
                                 nav_retry_count += 1
                             else:
                                 print(f"  [错误] 页面加载失败，已重试 {nav_max_retries} 次")
                                 break
-                                
+
                     except Exception as e:
                         if nav_retry_count < nav_max_retries:
                             print(f"  [警告] 翻页异常，第 {nav_retry_count + 1}/{nav_max_retries} 次重试... {e}")
@@ -852,11 +877,10 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
                         else:
                             print(f"  [错误] 翻页失败，已重试 {nav_max_retries} 次: {e}")
                             break
-                
+
                 if not page_loaded:
-                    print(f"  [提示] 第 {page_num} 页翻页失败，跳过该页继续爬取后续页面")
-                    page_num += 1
-                    continue
+                    print(f"  [提示] 第 {page_num + 1} 页翻页失败，爬取结束")
+                    break
 
                 page_num += 1
 
