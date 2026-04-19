@@ -27,9 +27,8 @@ python england_tender.py --max-pages 5
 # 爬取全部页
 python england_tender.py --max-pages full
 
-# 带邮件发送（爬取前3页）
+# 带邮件发送（爬取前2页）
 python england_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com --start-page 1 --max-pages 2
-python england_tender.py --sender 997369014@qq.com --auth-code ofjhpedhiwtybbah --receiver 997369014@qq.com  --start-page 1 --max-pages 2
 """
 
 import argparse
