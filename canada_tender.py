@@ -86,7 +86,11 @@ def upload_to_gofile(filepath, token, folder_id, max_retries=2):
     """上传单个文件到 Gofile，支持重试"""
     filename = os.path.basename(filepath)
     filesize = os.path.getsize(filepath)
-    print(f"  上传: {filename} ({filesize / 1024 / 1024:.1f} MB)")
+    if filesize >= 1024 * 1024:  # >= 1MB
+        size_str = f"{filesize / 1024 / 1024:.1f} MB"
+    else:
+        size_str = f"{filesize / 1024:.1f} KB"
+    print(f"  上传: {filename} ({size_str})")
 
     last_error = None
     for attempt in range(max_retries + 1):
