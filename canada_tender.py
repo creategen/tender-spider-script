@@ -82,40 +82,53 @@ def create_gofile_account():
     return data["token"], data["rootFolder"]
 
 
-def upload_to_gofile(filepath, token, folder_id):
-    """上传单个文件到 Gofile"""
+def upload_to_gofile(filepath, token, folder_id, max_retries=2):
+    """上传单个文件到 Gofile，支持重试"""
     filename = os.path.basename(filepath)
     filesize = os.path.getsize(filepath)
     print(f"  上传: {filename} ({filesize / 1024 / 1024:.1f} MB)")
 
-    # 获取最佳服务器
-    resp = requests.get(f"{GOFILE_API}/servers", params={"token": token})
-    servers = resp.json()["data"]["servers"]
-    na_servers = [s["name"] for s in servers if s["zone"] == "na"]
-    server = na_servers[0] if na_servers else servers[0]["name"]
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                print(f"  第 {attempt + 1} 次重试上传...")
 
-    # 上传
-    upload_url = f"https://{server}.gofile.io/contents/uploadfile"
-    start_time = time.time()
-    with open(filepath, "rb") as f:
-        files = {"file": (filename, f)}
-        data = {"token": token, "folderId": folder_id}
-        resp = requests.post(upload_url, files=files, data=data, timeout=1800)
+            # 获取最佳服务器
+            resp = requests.get(f"{GOFILE_API}/servers", params={"token": token})
+            servers = resp.json()["data"]["servers"]
+            na_servers = [s["name"] for s in servers if s["zone"] == "na"]
+            server = na_servers[0] if na_servers else servers[0]["name"]
 
-    elapsed = time.time() - start_time
-    result = resp.json()
-    if result.get("status") != "ok":
-        raise Exception(f"上传失败: {result}")
+            # 上传
+            upload_url = f"https://{server}.gofile.io/contents/uploadfile"
+            start_time = time.time()
+            with open(filepath, "rb") as f:
+                files = {"file": (filename, f)}
+                data = {"token": token, "folderId": folder_id}
+                resp = requests.post(upload_url, files=files, data=data, timeout=1800)
 
-    download_page = result["data"]["downloadPage"]
-    print(f"  上传成功! ({elapsed:.1f}s) 下载页: {download_page}")
+            elapsed = time.time() - start_time
+            result = resp.json()
+            if result.get("status") != "ok":
+                raise Exception(f"上传失败: {result}")
 
-    return {
-        "filename": filename,
-        "downloadPage": download_page,
-        "fileId": result["data"]["id"],
-        "size": filesize,
-    }
+            download_page = result["data"]["downloadPage"]
+            print(f"  上传成功! ({elapsed:.1f}s) 下载页: {download_page}")
+
+            return {
+                "filename": filename,
+                "downloadPage": download_page,
+                "fileId": result["data"]["id"],
+                "size": filesize,
+            }
+        except Exception as e:
+            last_error = e
+            print(f"  上传失败(尝试 {attempt + 1}/{max_retries + 1}): {e}")
+            if attempt < max_retries:
+                time.sleep(3)  # 重试前等待3秒
+
+    raise Exception(f"上传失败，已重试 {max_retries} 次: {last_error}")
 
 
 def set_gofile_folder_public(folder_id, token):
@@ -140,12 +153,17 @@ def send_email(subject, sender, auth_code, recipient, download_link, upload_resu
     file_rows_text = ""
     for i, r in enumerate(upload_results, 1):
         bg = "#f2f2f2" if i % 2 == 1 else "#ffffff"
+        size_bytes = r['size']
+        if size_bytes >= 1024 * 1024:  # >= 1MB
+            size_str = f"{size_bytes/1024/1024:.1f} MB"
+        else:
+            size_str = f"{size_bytes/1024:.1f} KB"
         file_rows_html += f"""<tr style="background-color: {bg};">
 <td style="border: 1px solid #ddd; padding: 10px;">{i}</td>
 <td style="border: 1px solid #ddd; padding: 10px;">{r['filename']}</td>
-<td style="border: 1px solid #ddd; padding: 10px;">{r['size']/1024/1024:.1f} MB</td></tr>
+<td style="border: 1px solid #ddd; padding: 10px;">{size_str}</td></tr>
 """
-        file_rows_text += f"{i}. {r['filename']} ({r['size']/1024/1024:.1f} MB)\n"
+        file_rows_text += f"{i}. {r['filename']} ({size_str})\n"
 
     now_str = datetime.now().strftime('%Y年%m月%d日')
 
@@ -200,7 +218,7 @@ def send_email(subject, sender, auth_code, recipient, download_link, upload_resu
         server.login(sender, auth_code)
         server.sendmail(sender, recipient, msg.as_string())
         server.quit()
-        print("  ✓ 邮件发送成功！")
+        print("  [OK] 邮件发送成功！")
         return True
     except Exception as e:
         # 尝试TLS方式
@@ -210,10 +228,10 @@ def send_email(subject, sender, auth_code, recipient, download_link, upload_resu
             server.login(sender, auth_code)
             server.sendmail(sender, recipient, msg.as_string())
             server.quit()
-            print("  ✓ 邮件发送成功(TLS)！")
+            print("  [OK] 邮件发送成功(TLS)！")
             return True
         except Exception as e2:
-            print(f"  ✗ 邮件发送失败: {e2}")
+            print(f"  [FAIL] 邮件发送失败: {e2}")
             return False
 
 
@@ -271,11 +289,27 @@ def main():
         page.set_default_timeout(120000)
         page.set_default_navigation_timeout(120000)
 
-        # 步骤 2：访问目标页面
+        # 步骤 2：访问目标页面（增加重试机制）
         print("[步骤2] 访问目标页面...")
-        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=120000)
-        page.wait_for_load_state("load", timeout=60000)
-        print("  页面加载完成")
+        max_retries = 2
+        page_loaded = False
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    print(f"  第 {attempt + 1} 次重试访问...")
+                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=120000)
+                page.wait_for_load_state("load", timeout=60000)
+                print("  页面加载完成")
+                page_loaded = True
+                break
+            except Exception as e:
+                print(f"  页面加载失败(尝试 {attempt + 1}/{max_retries + 1}): {e}")
+                if attempt < max_retries:
+                    time.sleep(5)
+                else:
+                    print("  页面加载失败，程序退出")
+                    browser.close()
+                    return
 
         # 步骤 3：点击【Show more】展开资源列表
         print("[步骤3] 尝试点击【Show more】...")
@@ -378,54 +412,70 @@ def main():
         print("\n[步骤6] 逐个下载资源 CSV...")
         for i, res in enumerate(resource_links):
             print(f"\n  处理 {i+1}/{len(resource_links)}: {res['text']}")
-            try:
-                page.goto(
-                    res["href"],
-                    wait_until="domcontentloaded",
-                    timeout=120000,
-                )
-                page.wait_for_load_state("load", timeout=60000)
-                time.sleep(2)
-
-                go_links = page.query_selector_all("a.resource-url-analytics")
-                for link in go_links:
-                    href = link.get_attribute("href")
-                    if not href:
-                        continue
-                    if not href.startswith("http"):
-                        href = urljoin(res["href"], href)
-
-                    # 支持多种格式
-                    lower_href = href.lower()
-                    if lower_href.endswith(".csv"):
-                        ext = "csv"
-                    elif lower_href.endswith(".xlsx"):
-                        ext = "xlsx"
-                    elif lower_href.endswith(".xls"):
-                        ext = "xls"
-                    else:
-                        continue  # 跳过其他格式
-
-                    resource_name = re.sub(
-                        r'[<>:"/\\|?*]', "_", res["text"].strip()
+            
+            # 访问资源页面，增加重试机制
+            max_retries = 2
+            page_loaded = False
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        print(f"    第 {attempt + 1} 次重试访问页面...")
+                    page.goto(
+                        res["href"],
+                        wait_until="domcontentloaded",
+                        timeout=120000,
                     )
-                    new_filename = f"加拿大-招标-{resource_name}.{ext}"
-                    save_path = os.path.join(SAVE_DIR, new_filename)
+                    page.wait_for_load_state("load", timeout=60000)
+                    time.sleep(2)
+                    page_loaded = True
+                    break
+                except Exception as e:
+                    print(f"    访问资源页面失败(尝试 {attempt + 1}/{max_retries + 1}): {e}")
+                    if attempt < max_retries:
+                        time.sleep(5)  # 重试前等待5秒
+                    else:
+                        print(f"    已重试 {max_retries} 次，跳过此资源")
+            
+            if not page_loaded:
+                continue
 
+            go_links = page.query_selector_all("a.resource-url-analytics")
+            for link in go_links:
+                href = link.get_attribute("href")
+                if not href:
+                    continue
+                if not href.startswith("http"):
+                    href = urljoin(res["href"], href)
+
+                # 支持多种格式
+                lower_href = href.lower()
+                if lower_href.endswith(".csv"):
+                    ext = "csv"
+                elif lower_href.endswith(".xlsx"):
+                    ext = "xlsx"
+                elif lower_href.endswith(".xls"):
+                    ext = "xls"
+                else:
+                    continue  # 跳过其他格式
+
+                resource_name = re.sub(
+                    r'[<>:"/\\|?*]', "_", res["text"].strip()
+                )
+                new_filename = f"加拿大-招标-{resource_name}.{ext}"
+                save_path = os.path.join(SAVE_DIR, new_filename)
+
+                try:
+                    download_with_requests(href, save_path)
+                    print(f"    下载成功: {new_filename}")
+                except Exception as e:
+                    print(f"    requests 失败: {e}")
                     try:
-                        download_with_requests(href, save_path)
-                        print(f"    下载成功: {new_filename}")
-                    except Exception as e:
-                        print(f"    requests 失败: {e}")
-                        try:
-                            with page.expect_download(timeout=60000) as download_info:
-                                link.click()
-                            download_info.value.save_as(save_path)
-                            print(f"    浏览器下载成功: {new_filename}")
-                        except Exception as e2:
-                            print(f"    浏览器下载也失败: {e2}")
-            except Exception as e:
-                print(f"    访问资源页面失败: {e}")
+                        with page.expect_download(timeout=60000) as download_info:
+                            link.click()
+                        download_info.value.save_as(save_path)
+                        print(f"    浏览器下载成功: {new_filename}")
+                    except Exception as e2:
+                        print(f"    浏览器下载也失败: {e2}")
 
         browser.close()
 
