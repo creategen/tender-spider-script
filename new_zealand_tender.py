@@ -3,12 +3,23 @@
 新西兰 GETS 政府招标网站一键爬取脚本
 ============================================
 功能：爬取4个招标列表页面，逐条提取详情数据，输出带层级合并表头的Excel，
-     上传至Gofile.io并发送下载链接邮件。
+     智能发送邮件（小文件直接附件，大文件上传Gofile.io并发送下载链接）。
 
 用法：
-  python3 new_zealand_tender.py --sender 发件邮箱 --auth-code 授权码 --receiver 收件邮箱 [--full]
+  python3 new_zealand_tender.py --sender 发件邮箱 --auth-code 授权码 --receiver 收件邮箱 [选项]
+参数说明：
+  --sender        发件邮箱（QQ邮箱）
+  --auth-code     发件邮箱SMTP授权码
+  --receiver      收件邮箱
+选项：
+  --full        全量爬取（默认仅爬取"当前招标"）
+  --progress    按照进度文件记录的进度爬取（不传则强制重新爬取，忽略进度文件）
+  --skip-upload  跳过Gofile上传和邮件发送
 
-  不传 --full 时仅爬取"当前招标"，传 --full 时爬取全部4个类别（当前/逾期/已关闭/已完成）。
+QQ邮箱附件规则：
+  - 单个附件 ≤ 20MB
+  - 全部附件总大小 ≤ 50MB
+  符合规则则直接作为邮件附件发送，否则上传到Gofile.io并发送下载链接。
 
 依赖：
   pip3 install playwright requests beautifulsoup4 openpyxl
@@ -26,6 +37,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 import requests
 from bs4 import BeautifulSoup
@@ -44,6 +57,10 @@ SITES = [
     {"url": "https://www.gets.govt.nz/ExternalClosedTenderList.htm", "category": "已关闭招标"},
     {"url": "https://www.gets.govt.nz/ExternalAwardedTenderList.htm", "category": "已完成招标"},
 ]
+
+# QQ邮箱附件限制
+QQ_MAX_SINGLE_FILE_SIZE = 20 * 1024 * 1024  # 20MB
+QQ_MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50MB
 
 # 性能参数
 DETAIL_DELAY = 0.15       # HTTP详情请求间隔(秒)
@@ -293,7 +310,7 @@ def create_excel(data_list, category, output_path):
 
 # ==================== 第四步：爬取主流程 ====================
 
-def scrape_category(site_config, progress_file):
+def scrape_category(site_config, progress_file, use_progress=False):
     """爬取单个类别的完整流程"""
     url = site_config["url"]
     category = site_config["category"]
@@ -303,10 +320,16 @@ def scrape_category(site_config, progress_file):
     print(f"开始爬取: {category} - {url}")
     print(f"{'=' * 60}")
 
+    # 加载进度文件
     progress = load_progress(progress_file)
-    saved = progress.get(progress_key, {"all_urls": [], "data_list": [], "completed": False})
+    
+    # 如果不使用进度，忽略进度文件中的 completed 状态，强制重新爬取
+    if not use_progress:
+        saved = {"all_urls": [], "data_list": [], "completed": False}
+    else:
+        saved = progress.get(progress_key, {"all_urls": [], "data_list": [], "completed": False})
 
-    if saved.get("completed"):
+    if saved.get("completed") and os.path.exists(saved.get("output_path", "")):
         print(f"  {category} 已完成，跳过")
         return saved.get("output_path")
 
@@ -449,8 +472,8 @@ def upload_to_gofile(file_paths):
 
 # ==================== 第六步：发送邮件 ====================
 
-def send_email(sender, auth_code, receiver, download_link, file_info_list):
-    """发送包含下载链接的邮件"""
+def send_email_with_gofile_link(sender, auth_code, receiver, download_link, file_info_list):
+    """发送包含Gofile下载链接的邮件（HTML格式）"""
     print(f"\n发送邮件到 {receiver}...")
 
     subject = "新西兰GETS政府招标网站爬取结果 - Excel下载链接"
@@ -470,25 +493,25 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
 
     now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y年%m月%d日')
 
-    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
-<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px;">新西兰 GETS 政府招标网站爬取结果</h2>
-<div style="background-color: #eaf2f8; padding: 15px; border-radius: 5px; margin: 15px 0;">
+    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; font-size: 14px; line-height: 1.8; max-width: 700px; margin: 0 auto;">
+<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">新西兰 GETS 政府招标网站爬取结果</h2>
+<div style="background-color: #eaf2f8; padding: 15px; border-radius: 5px; margin: 15px 0; font-size: 14px;">
 <strong>爬取时间：</strong>{now_str}<br>
 <strong>数据来源：</strong>https://www.gets.govt.nz<br>
 <strong>总计：</strong>{len(file_info_list)}个Excel文件，{sum(f['records'] for f in file_info_list):,}条招标记录
 </div>
-<h3>下载链接</h3>
+<h3 style="font-size: 16px;">下载链接</h3>
 <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 20px; border-radius: 5px; text-align: center; margin: 15px 0;">
 <a href="{download_link}" style="font-size: 18px; color: #2980b9; font-weight: bold; text-decoration: none;">点击下载全部文件</a>
 <br><span style="color: #888; font-size: 13px;">{download_link}</span>
 <br><span style="color: #666; font-size: 12px;">（{len(file_info_list)}个Excel文件均在同一目录下，可逐个下载）</span>
 </div>
-<h3>文件清单</h3>
-<table style="border-collapse: collapse; width: 100%;">
+<h3 style="font-size: 16px;">文件清单</h3>
+<table style="border-collapse: collapse; width: 100%; font-size: 14px;">
 <tr style="background-color: #2980b9; color: white;"><th style="padding: 10px; text-align: left;">序号</th><th style="padding: 10px; text-align: left;">文件名</th><th style="padding: 10px; text-align: left;">招标类别</th><th style="padding: 10px; text-align: left;">记录数</th></tr>
 {file_rows_html}
 </table>
-<div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+<div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 5px; margin: 20px 0; font-size: 14px;">
 <strong style="color: #721c24;">提醒：Gofile.io 链接有效期有限，建议尽快下载。</strong>
 </div>
 <p style="color:#888; font-size:12px; margin-top:20px;">此邮件由自动化爬取系统发送，请勿直接回复。</p>
@@ -538,6 +561,90 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
             return False
 
 
+def send_email_with_attachments(sender, auth_code, receiver, file_info_list, output_files):
+    """发送带附件的邮件（符合QQ邮箱规则）"""
+    print(f"\n发送邮件到 {receiver}（带附件）...")
+
+    subject = "新西兰GETS政府招标网站爬取结果 - Excel附件"
+
+    # 文件清单
+    file_rows_text = ""
+    for i, info in enumerate(file_info_list, 1):
+        file_rows_text += f"{i}. {info['filename']} ({info['category']}, {info['records']}条)\n"
+
+    now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y年%m月%d日')
+
+    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; font-size: 14px; line-height: 1.8; max-width: 700px; margin: 0 auto;">
+<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">新西兰 GETS 政府招标网站爬取结果</h2>
+<div style="background-color: #eaf2f8; padding: 15px; border-radius: 5px; margin: 15px 0; font-size: 14px;">
+<strong>爬取时间：</strong>{now_str}<br>
+<strong>数据来源：</strong>https://www.gets.govt.nz<br>
+<strong>总计：</strong>{len(file_info_list)}个Excel文件，{sum(f['records'] for f in file_info_list):,}条招标记录（作为附件发送）
+</div>
+<h3 style="font-size: 16px;">文件清单</h3>
+<pre style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; font-family: Consolas, Monaco, monospace; font-size: 13px;">{file_rows_text}</pre>
+<div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 20px 0; font-size: 14px;">
+<strong style="color: #155724;">✓ 文件已作为附件发送，可直接下载。</strong>
+</div>
+<p style="color:#888; font-size:12px; margin-top:20px;">此邮件由自动化爬取系统发送，请勿直接回复。</p>
+</body></html>"""
+
+    text_body = f"""新西兰 GETS 政府招标网站爬取结果
+
+爬取时间：{now_str}
+数据来源：https://www.gets.govt.nz
+总计：{len(file_info_list)}个Excel文件，{sum(f['records'] for f in file_info_list):,}条招标记录（作为附件发送）
+
+文件清单：
+{file_rows_text}
+文件已作为附件发送，可直接下载。
+"""
+
+    msg = MIMEMultipart("mixed")
+    msg["From"] = sender
+    msg["To"] = receiver
+    msg["Subject"] = subject
+
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    # 添加附件
+    for i, fpath in enumerate(output_files):
+        filename = os.path.basename(fpath)
+        try:
+            with open(fpath, "rb") as f:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(f.read())
+                encoders.encode_base64(part)
+                # 正确设置附件文件名
+                part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
+                msg.attach(part)
+            print(f"  已添加附件: {filename}")
+        except Exception as e:
+            print(f"  添加附件失败: {filename} - {e}")
+
+    try:
+        server = smtplib.SMTP_SSL("smtp.qq.com", 465)
+        server.login(sender, auth_code)
+        server.sendmail(sender, receiver, msg.as_string())
+        server.quit()
+        print("  ✓ 邮件发送成功（带附件）！")
+        return True
+    except Exception as e:
+        # 尝试TLS方式
+        try:
+            server = smtplib.SMTP("smtp.qq.com", 587)
+            server.starttls()
+            server.login(sender, auth_code)
+            server.sendmail(sender, receiver, msg.as_string())
+            server.quit()
+            print("  ✓ 邮件发送成功（带附件，TLS）！")
+            return True
+        except Exception as e2:
+            print(f"  ✗ 邮件发送失败: {e2}")
+            return False
+
+
 # ==================== 主入口 ====================
 
 def main():
@@ -548,11 +655,11 @@ def main():
     parser.add_argument("--output-dir", default=None, help="输出目录（默认: 脚本所在目录/output）")
     parser.add_argument("--skip-upload", action="store_true", help="跳过Gofile上传和邮件发送")
     parser.add_argument("--full", action="store_true", help="全量爬取（默认仅爬取当前招标）")
+    parser.add_argument("--progress", action="store_true", help="按照进度文件记录的进度爬取（不传则强制重新爬取，忽略进度文件）")
     args = parser.parse_args()
 
-    if args.output_dir:
-        global OUTPUT_DIR
-        OUTPUT_DIR = args.output_dir
+    # 设置输出目录
+    output_dir = args.output_dir if args.output_dir else OUTPUT_DIR
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(PROGRESS_DIR, exist_ok=True)
@@ -574,7 +681,7 @@ def main():
 
     output_files = []
     for site in sites_to_scrape:
-        output_path = scrape_category(site, progress_file)
+        output_path = scrape_category(site, progress_file, args.progress)
         if output_path and os.path.exists(output_path):
             output_files.append(output_path)
 
@@ -591,17 +698,18 @@ def main():
         print("\n跳过Gofile上传和邮件发送（--skip-upload）")
         return
 
-    # ===== 上传Gofile =====
-    download_link = upload_to_gofile(output_files)
-
-    if not download_link:
-        print("上传失败，跳过邮件发送")
-        return
-
-    # ===== 统计文件信息 =====
+    # ===== 统计文件信息和大小 =====
     file_info_list = []
+    output_files_with_size = []  # (filepath, filename, filesize)
+    total_size = 0
+    can_send_as_attachment = True
+
     for fpath in output_files:
         fname = os.path.basename(fpath)
+        filesize = os.path.getsize(fpath)
+        total_size += filesize
+        output_files_with_size.append((fpath, fname, filesize))
+
         # 从文件名提取类别
         category = "未知"
         for site in sites_to_scrape:
@@ -625,14 +733,45 @@ def main():
             "records": records,
         })
 
-    # ===== 发送邮件 =====
-    send_email(args.sender, args.auth_code, args.receiver, download_link, file_info_list)
+    # ===== 判断发送方式 =====
+    # 检查单个文件大小
+    for fpath, fname, filesize in output_files_with_size:
+        if filesize > QQ_MAX_SINGLE_FILE_SIZE:
+            can_send_as_attachment = False
+            print(f"\n  ⚠️ 文件 {fname} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
+            break
 
-    print(f"\n{'=' * 60}")
-    print("全部完成！")
-    print(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"下载链接: {download_link}")
-    print(f"{'=' * 60}")
+    # 检查总大小
+    if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+        can_send_as_attachment = False
+        print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
+
+    if can_send_as_attachment:
+        # 方式1：作为邮件附件发送
+        print(f"\n文件总大小: {total_size/1024/1024:.1f}MB，符合QQ邮箱附件规则")
+        send_email_with_attachments(args.sender, args.auth_code, args.receiver, file_info_list, output_files)
+
+        print(f"\n{'=' * 60}")
+        print("全部完成！")
+        print(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"文件已作为附件发送")
+        print(f"{'=' * 60}")
+
+    else:
+        # 方式2：上传到Gofile，邮件发送下载链接
+        download_link = upload_to_gofile(output_files)
+
+        if not download_link:
+            print("上传失败，跳过邮件发送")
+            return
+
+        send_email_with_gofile_link(args.sender, args.auth_code, args.receiver, download_link, file_info_list)
+
+        print(f"\n{'=' * 60}")
+        print("全部完成！")
+        print(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"下载链接: {download_link}")
+        print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":

@@ -3,10 +3,14 @@
 加拿大开放数据平台 — 招标数据爬取、上传与邮件通知
 
 用法:
-  python3 canada_tender.py --sender 发件邮箱 --auth-code 授权码 --receiver 收件邮箱 [--full]
-
-  不传 --full 时，仅下载 "New tender notices" 和 "Open tender notices" 两份 CSV；
-  传入 --full 时，爬取全量资源。
+  python3 canada_tender.py --sender 发件邮箱 --auth-code 授权码 --receiver 收件邮箱 [--files 值]
+参数说明：
+  --sender        发件邮箱（QQ邮箱）
+  --auth-code     发件邮箱SMTP授权码
+  --receiver      收件邮箱
+  不传 --files 时，默认仅下载 "New tender notices" 和 "Open tender notices" 两份 CSV；
+  传入 --files full 时，下载全量文件；
+  传入 --files 且值为文件名列表时，下载指定的文件，多个文件用分号(;)分割。如："New tender notices;Open tender notices;Tender notices, 2026-2027"
 """
 
 import argparse
@@ -19,6 +23,8 @@ import requests
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import sync_playwright
@@ -41,6 +47,10 @@ USER_AGENT = (
 )
 
 SAVE_DIR = os.path.join(os.getcwd(), "加拿大招标")
+
+# QQ邮箱附件限制
+QQ_MAX_SINGLE_FILE_SIZE = 20 * 1024 * 1024  # 20MB
+QQ_MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50MB
 
 # ==================== 工具函数 ====================
 
@@ -148,8 +158,8 @@ def set_gofile_folder_public(folder_id, token):
     return resp.json()
 
 
-def send_email(subject, sender, auth_code, recipient, download_link, upload_results):
-    """发送包含下载链接的邮件（HTML格式）"""
+def send_email_with_gofile_link(subject, sender, auth_code, recipient, download_link, upload_results):
+    """发送包含Gofile下载链接的邮件（HTML格式）"""
     print(f"\n发送邮件到 {recipient}...")
 
     # 文件清单表格行
@@ -171,14 +181,14 @@ def send_email(subject, sender, auth_code, recipient, download_link, upload_resu
 
     now_str = datetime.now().strftime('%Y年%m月%d日')
 
-    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
-<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px;">加拿大开放数据平台 - 招标数据爬取结果</h2>
+    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; font-size: 15px; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
+<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">加拿大开放数据平台 - 招标数据爬取结果</h2>
 <div style="background-color: #eaf2f8; padding: 15px; border-radius: 5px; margin: 15px 0;">
 <strong>爬取时间：</strong>{now_str}<br>
 <strong>数据来源：</strong>https://open.canada.ca<br>
 <strong>总计：</strong>{len(upload_results)}个文件
 </div>
-<h3>下载链接</h3>
+<h3 style="font-size: 17px;">下载链接</h3>
 <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 20px; border-radius: 5px; text-align: center; margin: 15px 0;">
 <a href="{download_link}" style="font-size: 18px; color: #2980b9; font-weight: bold; text-decoration: none;">点击下载全部文件</a>
 <br><span style="color: #888; font-size: 13px;">{download_link}</span>
@@ -239,6 +249,93 @@ def send_email(subject, sender, auth_code, recipient, download_link, upload_resu
             return False
 
 
+def send_email_with_attachments(subject, sender, auth_code, recipient, files):
+    """发送带附件的邮件（符合QQ邮箱规则）"""
+    print(f"\n发送邮件到 {recipient}（带附件）...")
+
+    # 文件清单
+    file_rows_text = ""
+    total_size = 0
+    for i, (filepath, filename, filesize) in enumerate(files, 1):
+        total_size += filesize
+        if filesize >= 1024 * 1024:  # >= 1MB
+            size_str = f"{filesize/1024/1024:.1f} MB"
+        else:
+            size_str = f"{filesize/1024:.1f} KB"
+        file_rows_text += f"{i}. {filename} ({size_str})\n"
+
+    now_str = datetime.now().strftime('%Y年%m月%d日')
+
+    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; font-size: 15px; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
+<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">加拿大开放数据平台 - 招标数据爬取结果</h2>
+<div style="background-color: #eaf2f8; padding: 15px; border-radius: 5px; margin: 15px 0;">
+<strong>爬取时间：</strong>{now_str}<br>
+<strong>数据来源：</strong>https://open.canada.ca<br>
+<strong>总计：</strong>{len(files)}个文件（作为附件发送）
+</div>
+<h3 style="font-size: 17px;">文件清单</h3>
+<pre style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; font-family: Consolas, Monaco, monospace;">{file_rows_text}</pre>
+<div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+<strong style="color: #155724;">✓ 文件已作为附件发送，可直接下载。</strong>
+</div>
+<p style="color:#888; font-size:12px; margin-top:20px;">此邮件由自动化爬取系统发送，请勿直接回复。</p>
+</body></html>"""
+
+    text_body = f"""加拿大开放数据平台 - 招标数据爬取结果
+
+爬取时间：{now_str}
+数据来源：https://open.canada.ca
+总计：{len(files)}个文件（作为附件发送）
+
+文件清单：
+{file_rows_text}
+文件已作为附件发送，可直接下载。
+"""
+
+    msg = MIMEMultipart("mixed")
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = subject
+
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    # 添加附件
+    for filepath, filename, filesize in files:
+        try:
+            with open(filepath, "rb") as f:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(f.read())
+                encoders.encode_base64(part)
+                # 正确设置附件文件名
+                part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
+                msg.attach(part)
+            print(f"  已添加附件: {filename}")
+        except Exception as e:
+            print(f"  添加附件失败: {filename} - {e}")
+
+    try:
+        server = smtplib.SMTP_SSL("smtp.qq.com", 465)
+        server.login(sender, auth_code)
+        server.sendmail(sender, recipient, msg.as_string())
+        server.quit()
+        print("  [OK] 邮件发送成功（带附件）！")
+        return True
+    except Exception as e:
+        # 尝试TLS方式
+        try:
+            server = smtplib.SMTP("smtp.qq.com", 587)
+            server.starttls()
+            server.login(sender, auth_code)
+            server.sendmail(sender, recipient, msg.as_string())
+            server.quit()
+            print("  [OK] 邮件发送成功（带附件，TLS）！")
+            return True
+        except Exception as e2:
+            print(f"  [FAIL] 邮件发送失败: {e2}")
+            return False
+
+
 # ==================== 主流程 ====================
 
 def main():
@@ -256,20 +353,31 @@ def main():
         "--receiver", required=True, help="收件邮箱"
     )
     parser.add_argument(
-        "--full", action="store_true", default=False,
-        help="爬取全量资源（默认仅下载 New tender notices 和 Open tender notices）"
+        "--files", type=str, default=None,
+        help="指定下载的文件。不传=默认下载New/Open tender notices；full=全量下载；文件名列表=下载指定文件（分号分割）"
     )
     args = parser.parse_args()
 
     sender = args.sender
     auth_code = args.auth_code
     recipient = args.receiver
-    full_mode = args.full
-
-    if full_mode:
+    
+    # 解析 files 参数
+    if args.files is None:
+        # 不传 --files 参数：默认下载 "New tender notices" 和 "Open tender notices"
+        download_mode = "default"
+        specified_files = None
+        print("模式: 仅下载 New tender notices 和 Open tender notices")
+    elif args.files == "full":
+        # 传 --files full：下载全量文件
+        download_mode = "full"
+        specified_files = None
         print("模式: 全量爬取")
     else:
-        print("模式: 仅下载 New tender notices 和 Open tender notices")
+        # 传 --files 且值为文件名列表：下载指定的文件
+        download_mode = "specified"
+        specified_files = [f.strip() for f in args.files.split(";") if f.strip()]
+        print(f"模式: 下载指定文件 - {', '.join(specified_files)}")
 
     os.makedirs(SAVE_DIR, exist_ok=True)
     print(f"保存目录: {SAVE_DIR}\n")
@@ -328,45 +436,35 @@ def main():
         except Exception:
             print("  未找到 Show more 按钮，列表可能已展开，跳过")
 
-        # 步骤 4：下载当前页面自身的资源
-        print("[步骤4] 下载当前页面资源...")
-        go_to_resource_links = page.query_selector_all("a.resource-url-analytics")
-        print(f"  找到 {len(go_to_resource_links)} 个 Go to resource 链接")
+        # 步骤 4：收集所有资源链接（包括当前页面和Resources列表）
+        print("[步骤4] 收集所有资源链接...")
+        resource_links = []
+        
+        # 4.1 首先处理当前页面（New tender notices）
+        # 根据下载模式判断是否收集当前页面
+        should_collect_current = False
+        if download_mode == "default" or download_mode == "full":
+            should_collect_current = True
+        elif download_mode == "specified":
+            # 检查 "New tender notices" 是否在指定文件中
+            if any("new tender notices" in sf.lower() for sf in specified_files):
+                should_collect_current = True
+        
+        if should_collect_current:
+            resource_links.append({
+                "text": "New tender notices",
+                "href": TARGET_URL
+            })
+            print("  收集: New tender notices (当前页面)")
+        else:
+            print("  跳过: New tender notices（未指定下载）")
 
-        for link in go_to_resource_links:
-            href = link.get_attribute("href")
-            if not href:
-                continue
-            if not href.startswith("http"):
-                href = urljoin(TARGET_URL, href)
-
-            # CSV 过滤
-            if not href.lower().endswith(".csv"):
-                print(f"  跳过非 CSV 文件: {href}")
-                continue
-
-            save_path = os.path.join(SAVE_DIR, "加拿大-招标-New tender notices.csv")
-            try:
-                print(f"  requests 下载: {href}")
-                original_name = download_with_requests(href, save_path)
-                print(f"  下载成功! 原始文件名: {original_name}")
-            except Exception as e:
-                print(f"  requests 下载失败: {e}, 尝试浏览器下载...")
-                try:
-                    with page.expect_download(timeout=120000) as download_info:
-                        link.click()
-                    download_info.value.save_as(save_path)
-                    print("  浏览器下载成功!")
-                except Exception as e2:
-                    print(f"  浏览器下载也失败: {e2}")
-
-        # 步骤 5：获取 Resources 列表中的全部资源链接
-        print("[步骤5] 获取 Resources 列表...")
+        # 4.2 获取 Resources 面板中的其他资源链接
+        print("  获取 Resources 列表...")
         resources_panel_selector = (
             "#wb-auto-5 > aside > div > section > "
             "div.panel-body.resources-side-panel.resources-side-panel-no-edit"
         )
-        resource_links = []
 
         try:
             panel = page.wait_for_selector(resources_panel_selector, timeout=10000)
@@ -382,14 +480,27 @@ def main():
                     if "/resource/" not in href:
                         continue
                     text_lower = text.lower()
+                    
+                    # 排除关键字过滤
                     skip = any(kw.lower() in text_lower for kw in EXCLUDE_KEYWORDS)
                     if skip:
                         print(f"  跳过: {text}")
                         continue
-                    # 非全量模式下，只收集 "Open tender notices"
-                    if not full_mode and "open tender notices" not in text_lower:
-                        print(f"  跳过（非全量模式）: {text}")
-                        continue
+                    
+                    # 根据下载模式判断是否收集该资源
+                    if download_mode == "default":
+                        # 默认模式：只收集 "Open tender notices"
+                        # （New tender notices 已在上面处理）
+                        if "open tender notices" not in text_lower:
+                            print(f"  跳过（默认模式）: {text}")
+                            continue
+                    elif download_mode == "specified":
+                        # 指定文件模式：只收集指定的文件
+                        if not any(sf.lower() in text_lower for sf in specified_files):
+                            print(f"  跳过（未指定）: {text}")
+                            continue
+                    # download_mode == "full" 时不跳过，收集所有资源
+                    
                     resource_links.append({"text": text, "href": href})
                     print(f"  收集: {text}")
         except Exception as e:
@@ -402,18 +513,26 @@ def main():
                     continue
                 if not href.startswith("http"):
                     href = urljoin(TARGET_URL, href)
+                
                 skip = any(kw.lower() in text.lower() for kw in EXCLUDE_KEYWORDS)
                 if skip:
                     continue
-                # 非全量模式下，只收集 "Open tender notices"
-                if not full_mode and "open tender notices" not in text.lower():
-                    continue
+                
+                # 根据下载模式判断是否收集该资源
+                if download_mode == "default":
+                    if "open tender notices" not in text.lower():
+                        continue
+                elif download_mode == "specified":
+                    if not any(sf.lower() in text.lower() for sf in specified_files):
+                        continue
+                # download_mode == "full" 时不跳过
+                
                 resource_links.append({"text": text, "href": href})
 
         print(f"  共收集 {len(resource_links)} 个资源链接")
 
-        # 步骤 6：逐个访问资源页面并下载 CSV
-        print("\n[步骤6] 逐个下载资源 CSV...")
+        # 步骤 5：逐个访问资源页面并下载 CSV
+        print("\n[步骤5] 逐个下载资源 CSV...")
         for i, res in enumerate(resource_links):
             print(f"\n  处理 {i+1}/{len(resource_links)}: {res['text']}")
             
@@ -483,58 +602,97 @@ def main():
 
         browser.close()
 
-    # ====== 阶段二：上传到 Gofile ======
+    # ====== 阶段二：判断发送方式 ======
 
-    print("\n[步骤7] 上传文件到 Gofile.io...")
-    token, root_folder = create_gofile_account()
-    print(f"  Gofile 账户已创建")
+    # 获取所有下载的文件及其大小
+    files = []
+    for f in os.listdir(SAVE_DIR):
+        filepath = os.path.join(SAVE_DIR, f)
+        if os.path.isfile(filepath):
+            filesize = os.path.getsize(filepath)
+            files.append((filepath, f, filesize))
 
-    files = sorted(
-        [
-            (f, os.path.getsize(os.path.join(SAVE_DIR, f)))
-            for f in os.listdir(SAVE_DIR)
-            if os.path.isfile(os.path.join(SAVE_DIR, f))
-        ],
-        key=lambda x: x[1],  # 小文件先上传
-    )
+    # 检查是否符合QQ邮箱附件规则
+    can_send_as_attachment = True
+    total_size = sum(f[2] for f in files)
+    
+    # 检查单个文件大小
+    for filepath, filename, filesize in files:
+        if filesize > QQ_MAX_SINGLE_FILE_SIZE:
+            can_send_as_attachment = False
+            print(f"\n  ⚠️ 文件 {filename} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
+            break
+    
+    # 检查总大小
+    if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+        can_send_as_attachment = False
+        print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
 
-    upload_results = []
-    for filename, filesize in files:
-        filepath = os.path.join(SAVE_DIR, filename)
+    if can_send_as_attachment:
+        # 方式1：作为邮件附件发送
+        print("\n[步骤6] 发送邮件（带附件）...")
+        print(f"  文件总大小: {total_size/1024/1024:.1f}MB，符合QQ邮箱附件规则")
+        
         try:
-            result = upload_to_gofile(filepath, token, root_folder)
-            upload_results.append(result)
+            send_email_with_attachments(
+                subject="加拿大开放数据平台 - 招标数据",
+                sender=sender,
+                auth_code=auth_code,
+                recipient=recipient,
+                files=files,
+            )
         except Exception as e:
-            print(f"  上传失败: {filename} - {e}")
+            print(f"  邮件发送失败: {e}")
 
-    # 关键：设置文件夹公开访问
-    print("\n  设置文件夹为公开访问...")
-    set_gofile_folder_public(root_folder, token)
-    print("  文件夹已设为公开")
+        # 汇总
+        print(f"\n{'='*60}")
+        print(f"完成! 共下载 {len(files)} 个文件")
+        print(f"文件已作为附件发送")
+        print(f"保存目录: {SAVE_DIR}")
 
-    # ====== 阶段三：发送邮件 ======
+    else:
+        # 方式2：上传到Gofile，邮件发送下载链接
+        print("\n[步骤6] 上传文件到 Gofile.io...")
+        token, root_folder = create_gofile_account()
+        print(f"  Gofile 账户已创建")
 
-    print("\n[步骤8] 发送邮件...")
-    download_page = upload_results[0]["downloadPage"] if upload_results else "N/A"
+        # 按文件大小排序，小文件先上传
+        files_sorted = sorted(files, key=lambda x: x[2])
+        
+        upload_results = []
+        for filepath, filename, filesize in files_sorted:
+            try:
+                result = upload_to_gofile(filepath, token, root_folder)
+                upload_results.append(result)
+            except Exception as e:
+                print(f"  上传失败: {filename} - {e}")
 
-    try:
-        send_email(
-            subject="加拿大开放数据平台 - 招标数据 Gofile 下载链接",
-            sender=sender,
-            auth_code=auth_code,
-            recipient=recipient,
-            download_link=download_page,
-            upload_results=upload_results,
-        )
-    except Exception as e:
-        print(f"  邮件发送失败: {e}")
+        # 关键：设置文件夹公开访问
+        print("\n  设置文件夹为公开访问...")
+        set_gofile_folder_public(root_folder, token)
+        print("  文件夹已设为公开")
 
-    # ====== 汇总 ======
+        # 发送邮件
+        print("\n[步骤7] 发送邮件...")
+        download_page = upload_results[0]["downloadPage"] if upload_results else "N/A"
 
-    print(f"\n{'='*60}")
-    print(f"完成! 共下载 {len(files)} 个文件，上传 {len(upload_results)} 个")
-    print(f"Gofile 链接: {download_page}")
-    print(f"保存目录: {SAVE_DIR}")
+        try:
+            send_email_with_gofile_link(
+                subject="加拿大开放数据平台 - 招标数据 Gofile 下载链接",
+                sender=sender,
+                auth_code=auth_code,
+                recipient=recipient,
+                download_link=download_page,
+                upload_results=upload_results,
+            )
+        except Exception as e:
+            print(f"  邮件发送失败: {e}")
+
+        # 汇总
+        print(f"\n{'='*60}")
+        print(f"完成! 共下载 {len(files)} 个文件，上传 {len(upload_results)} 个")
+        print(f"Gofile 链接: {download_page}")
+        print(f"保存目录: {SAVE_DIR}")
 
 
 if __name__ == "__main__":

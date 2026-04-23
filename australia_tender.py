@@ -62,6 +62,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 from urllib3.exceptions import InsecureRequestWarning
 import urllib3
 
@@ -100,6 +102,10 @@ RETRY_DELAYS = [121, 121, 0]
 # 保存目录
 SAVE_DIR = os.path.join(os.getcwd(), "澳大利亚招标")
 
+# QQ邮箱附件限制
+QQ_MAX_SINGLE_FILE_SIZE = 20 * 1024 * 1024  # 20MB
+QQ_MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50MB
+
 # ==================== HTTP 会话 ====================
 
 http_session = requests.Session()
@@ -133,7 +139,7 @@ HEADER_STRUCTURE_1 = [
     ("Addenda Available", []),
 ]
 
-# 网站爬取2 表头（已结项采购项目）- 与爬取1相同
+# 网站爬取2 表头（RSS采购数据）- 与爬取1相同
 HEADER_STRUCTURE_2 = HEADER_STRUCTURE_1.copy()
 
 FLAT_HEADERS_1 = []
@@ -674,7 +680,7 @@ def crawl_rss_xml(status_filter="full"):
 
     # 保存文件名
     os.makedirs(SAVE_DIR, exist_ok=True)
-    file_path = os.path.join(SAVE_DIR, "澳大利亚-已结项采购项目.xlsx")
+    file_path = os.path.join(SAVE_DIR, "澳大利亚-RSS采购数据.xlsx")
 
     # 获取 RSS XML
     print("\n[步骤1] 获取 RSS XML...")
@@ -736,72 +742,126 @@ def crawl_rss_xml(status_filter="full"):
 
 # ==================== Gofile 上传 ====================
 
+def create_gofile_account():
+    """创建 Gofile 匿名账户，返回 token 和 rootFolderId"""
+    resp = requests.post("https://api.gofile.io/accounts")
+    data = resp.json()["data"]
+    return data["token"], data["rootFolder"]
+
+
+def upload_to_gofile_single(filepath, token, folder_id, max_retries=2):
+    """上传单个文件到 Gofile，支持重试，返回上传结果"""
+    import time
+    
+    filename = os.path.basename(filepath)
+    filesize = os.path.getsize(filepath)
+    if filesize >= 1024 * 1024:  # >= 1MB
+        size_str = f"{filesize / 1024 / 1024:.1f} MB"
+    else:
+        size_str = f"{filesize / 1024:.1f} KB"
+    print(f"  上传: {filename} ({size_str})")
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                print(f"  第 {attempt + 1} 次重试上传...")
+
+            # 获取最佳服务器
+            resp = requests.get(f"https://api.gofile.io/servers", params={"token": token}, timeout=30)
+            servers = resp.json()["data"]["servers"]
+            na_servers = [s["name"] for s in servers if s["zone"] == "na"]
+            server = na_servers[0] if na_servers else servers[0]["name"]
+
+            # 上传
+            upload_url = f"https://{server}.gofile.io/contents/uploadfile"
+            start_time = time.time()
+            with open(filepath, "rb") as f:
+                files = {"file": (filename, f)}
+                data = {"token": token, "folderId": folder_id}
+                resp = requests.post(upload_url, files=files, data=data, timeout=1800)
+
+            elapsed = time.time() - start_time
+            result = resp.json()
+            if result.get("status") != "ok":
+                raise Exception(f"上传失败: {result}")
+
+            download_page = result["data"]["downloadPage"]
+            print(f"  上传成功! ({elapsed:.1f}s) 下载页: {download_page}")
+
+            return {
+                "filename": filename,
+                "downloadPage": download_page,
+                "fileId": result["data"]["id"],
+                "size": filesize,
+            }
+        except Exception as e:
+            last_error = e
+            print(f"  上传失败(尝试 {attempt + 1}/{max_retries + 1}): {e}")
+            if attempt < max_retries:
+                time.sleep(3)
+
+    raise Exception(f"上传失败，已重试 {max_retries} 次: {last_error}")
+
+
+def set_gofile_folder_public(folder_id, token):
+    """设置 Gofile 文件夹为公开访问"""
+    resp = requests.put(
+        f"https://api.gofile.io/contents/{folder_id}/update",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={"attribute": "public", "attributeValue": True},
+    )
+    return resp.json()
+
+
 def upload_to_gofile(file_paths):
-    """将多个文件上传到 Gofile 同一目录，返回下载链接"""
+    """
+    将多个文件上传到 Gofile 同一目录
+    返回: (download_link, upload_results)
+    """
     import time
     
     print("\n[步骤] 上传文件到 Gofile.io...")
 
     # 创建账户
-    create_resp = requests.post("https://api.gofile.io/accounts", timeout=30)
-    create_data = create_resp.json()
-    if create_data.get("status") != "ok":
-        print(f"  创建 Gofile 账户失败: {create_data}")
-        return None
+    token, root_folder = create_gofile_account()
+    print(f"  Gofile 账户已创建")
 
-    token = create_data["data"]["token"]
-    root_folder = create_data["data"]["rootFolder"]
+    # 按文件大小排序，小文件先上传
+    files_with_size = [(fp, os.path.getsize(fp)) for fp in file_paths]
+    files_sorted = sorted(files_with_size, key=lambda x: x[1])
+    
+    upload_results = []
+    for filepath, filesize in files_sorted:
+        try:
+            result = upload_to_gofile_single(filepath, token, root_folder)
+            upload_results.append(result)
+        except Exception as e:
+            print(f"  上传失败: {os.path.basename(filepath)} - {e}")
 
-    folder_id = None
-    folder_code = None
+    # 关键：设置文件夹公开访问
+    if upload_results and token:
+        first_result = upload_results[0]
+        # 从 downloadPage 提取 folder code
+        # downloadPage 格式类似: https://gofile.io/d/foldercode
+        folder_code = first_result["downloadPage"].split("/")[-1]
+        
+        print("\n  设置文件夹为公开访问...")
+        # 需要获取 folder id，从 upload result 中获取
+        # 实际上我们需要用 root_folder
+        try:
+            set_gofile_folder_public(root_folder, token)
+            print("  文件夹已设为公开")
+        except Exception as e:
+            print(f"  设置公开失败: {e}")
 
-    for i, fpath in enumerate(file_paths):
-        fname = os.path.basename(fpath)
-        size_mb = os.path.getsize(fpath) / 1024 / 1024
-        print(f"  上传: {fname} ({size_mb:.1f}MB)...")
-
-        data = {"token": token, "folderId": root_folder if i == 0 else folder_id}
-
-        # 获取服务器
-        sr = requests.get("https://api.gofile.io/servers", timeout=30)
-        s = sr.json()["data"]["servers"][0]["name"]
-
-        with open(fpath, "rb") as f:
-            upload_resp = requests.post(
-                f"https://{s}.gofile.io/uploadFile",
-                files={"file": (fname, f)},
-                data=data,
-                timeout=300,
-            )
-
-        upload_data = upload_resp.json()
-        if upload_data.get("status") == "ok":
-            if i == 0:
-                folder_id = upload_data["data"]["parentFolder"]
-                folder_code = upload_data["data"]["parentFolderCode"]
-            print(f"    成功")
-        else:
-            print(f"    失败: {upload_data}")
-
-        time.sleep(1)
-
-    # 设置文件夹公开访问
-    if folder_id and token:
-        print("  设置文件夹公开访问...")
-        pub_resp = requests.put(
-            f"https://api.gofile.io/contents/{folder_id}/update",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"attribute": "public", "attributeValue": True},
-            timeout=30,
-        )
-        if pub_resp.status_code == 200 and pub_resp.json().get("status") == "ok":
-            print("    文件夹已设为公开")
-        else:
-            print(f"    设置公开失败: {pub_resp.text[:200]}")
-
-    download_link = f"https://gofile.io/d/{folder_code}" if folder_code else None
+    download_link = upload_results[0]["downloadPage"] if upload_results else None
     print(f"  下载链接: {download_link}")
-    return download_link
+    
+    return download_link, upload_results
 
 
 # ==================== 邮件发送 ====================
@@ -879,6 +939,96 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
         print(f"  邮件发送失败: {e}")
 
 
+def send_email_with_attachments(sender, auth_code, receiver, files, file_records):
+    """发送带附件的邮件（符合QQ邮箱规则）"""
+    print(f"\n[步骤] 发送邮件到 {receiver}（带附件）...")
+
+    subject = "澳大利亚 AusTender 招标数据爬取结果 - Excel附件"
+
+    # 文件清单
+    file_rows_text = ""
+    total_size = 0
+    for i, (filepath, filename, filesize) in enumerate(files, 1):
+        total_size += filesize
+        if filesize >= 1024 * 1024:  # >= 1MB
+            size_str = f"{filesize/1024/1024:.1f} MB"
+        else:
+            size_str = f"{filesize/1024:.1f} KB"
+        records = file_records.get(filename, 0)
+        file_rows_text += f"{i}. {filename} ({size_str}, {records}条记录)\n"
+
+    now_str = datetime.now().strftime('%Y-%m-%d')
+    total_records = sum(file_records.values())
+
+    html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
+<h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px;">澳大利亚 AusTender 招标数据爬取结果</h2>
+<div style="background-color: #eaf2f8; padding: 15px; border-radius: 5px; margin: 15px 0;">
+<strong>爬取时间：</strong>{now_str}<br>
+<strong>数据来源：</strong>https://www.tenders.gov.au<br>
+<strong>总计：</strong>{len(files)}个Excel文件，{total_records:,}条招标记录（作为附件发送）
+</div>
+<h3>文件清单</h3>
+<pre style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; font-family: Consolas, Monaco, monospace;">{file_rows_text}</pre>
+<div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+<strong style="color: #155724;">✓ 文件已作为附件发送，可直接下载。</strong>
+</div>
+<p style="color:#888; font-size:12px; margin-top:20px;">此邮件由自动化爬取系统发送，请勿直接回复。</p>
+</body></html>"""
+
+    text_body = f"""澳大利亚 AusTender 招标数据爬取结果
+
+爬取时间：{now_str}
+数据来源：https://www.tenders.gov.au
+总计：{len(files)}个Excel文件，{total_records:,}条招标记录（作为附件发送）
+
+文件清单：
+{file_rows_text}
+文件已作为附件发送，可直接下载。
+"""
+
+    msg = MIMEMultipart("mixed")
+    msg["From"] = sender
+    msg["To"] = receiver
+    msg["Subject"] = subject
+
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    # 添加附件
+    for filepath, filename, filesize in files:
+        try:
+            with open(filepath, "rb") as f:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(f.read())
+                encoders.encode_base64(part)
+                # 正确设置附件文件名
+                part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
+                msg.attach(part)
+            print(f"  已添加附件: {filename}")
+        except Exception as e:
+            print(f"  添加附件失败: {filename} - {e}")
+
+    try:
+        with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
+            server.login(sender, auth_code)
+            server.sendmail(sender, receiver, msg.as_string())
+        print("  邮件发送成功（带附件）!")
+        return True
+    except Exception as e:
+        # 尝试TLS方式
+        try:
+            server = smtplib.SMTP("smtp.qq.com", 587)
+            server.starttls()
+            server.login(sender, auth_code)
+            server.sendmail(sender, receiver, msg.as_string())
+            server.quit()
+            print("  邮件发送成功（带附件，TLS）！")
+            return True
+        except Exception as e2:
+            print(f"  邮件发送失败: {e2}")
+            return False
+
+
 # ==================== 主流程 ====================
 
 def main(crawl_type=None, max_pages="full", start_page=1, sender=None, auth_code=None, receiver=None, search_status="full", rss_status="full", tender_types=None):
@@ -928,18 +1078,89 @@ def main(crawl_type=None, max_pages="full", start_page=1, sender=None, auth_code
 
     # 上传并发送邮件
     if sender and auth_code and receiver and saved_files:
-        download_link = upload_to_gofile(saved_files)
+        # 获取所有保存的文件及其大小
+        files = []
+        file_records_dict = {}
+        for fp, rec_count in zip(saved_files, saved_records):
+            filepath = fp
+            filename = os.path.basename(fp)
+            filesize = os.path.getsize(filepath)
+            files.append((filepath, filename, filesize))
+            file_records_dict[filename] = rec_count
 
-        if download_link:
-            file_info_list = []
-            for fp, rec_count in zip(saved_files, saved_records):
-                file_info_list.append({
-                    "filename": os.path.basename(fp),
-                    "records": rec_count,
-                })
-            send_email(sender, auth_code, receiver, download_link, file_info_list)
+        # 检查是否符合QQ邮箱附件规则
+        can_send_as_attachment = True
+        total_size = sum(f[2] for f in files)
+        
+        # 检查单个文件大小
+        for filepath, filename, filesize in files:
+            if filesize > QQ_MAX_SINGLE_FILE_SIZE:
+                can_send_as_attachment = False
+                print(f"\n  ⚠️ 文件 {filename} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
+                break
+        
+        # 检查总大小
+        if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+            can_send_as_attachment = False
+            print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
+
+        if can_send_as_attachment:
+            # 方式1：作为邮件附件发送
+            print("\n[步骤] 发送邮件（带附件）...")
+            print(f"  文件总大小: {total_size/1024/1024:.1f}MB，符合QQ邮箱附件规则")
+            
+            try:
+                send_email_with_attachments(
+                    sender=sender,
+                    auth_code=auth_code,
+                    receiver=receiver,
+                    files=files,
+                    file_records=file_records_dict,
+                )
+            except Exception as e:
+                print(f"  邮件发送失败: {e}")
+
+            # 汇总
+            print(f"\n{'='*60}")
+            print(f"完成! 共下载 {len(saved_files)} 个文件")
+            print(f"文件已作为附件发送")
+            print(f"保存目录: {SAVE_DIR}")
+
         else:
-            print("\n[警告] Gofile 上传失败，跳过邮件发送")
+            # 方式2：上传到Gofile，邮件发送下载链接
+            print("\n[步骤] 上传文件到 Gofile.io...")
+            
+            try:
+                download_link, upload_results = upload_to_gofile(saved_files)
+
+                if download_link and upload_results:
+                    # 准备文件信息列表
+                    file_info_list = []
+                    for result in upload_results:
+                        filename = result["filename"]
+                        records = file_records_dict.get(filename, 0)
+                        file_info_list.append({
+                            "filename": filename,
+                            "records": records,
+                        })
+                    
+                    send_email(sender, auth_code, receiver, download_link, file_info_list)
+                else:
+                    print("\n[警告] Gofile 上传失败，跳过邮件发送")
+            except Exception as e:
+                print(f"\n[警告] Gofile 上传或邮件发送失败: {e}")
+                download_link = None
+                upload_results = []
+
+            # 汇总
+            print(f"\n{'='*60}")
+            print(f"完成! 共下载 {len(saved_files)} 个文件")
+            if 'upload_results' in locals() and upload_results:
+                print(f"上传 {len(upload_results)} 个文件到 Gofile")
+                link_str = download_link if 'download_link' in locals() and download_link else 'N/A'
+                print(f"Gofile 链接: {link_str}")
+            print(f"保存目录: {SAVE_DIR}")
+
     elif saved_files:
         print("\n[提示] 未提供邮件参数，跳过上传和邮件发送")
         print("  如需上传并发送邮件，请使用:")
