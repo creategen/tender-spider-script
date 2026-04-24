@@ -29,6 +29,12 @@ python england_tender.py --max-pages full
 
 # 带邮件发送（爬取前2页）
 python england_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com --start-page 1 --max-pages 2
+
+# 多个收件邮箱用分号分隔
+python england_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com;yyy@live.com --attachments
+
+# 传 --attachments 时，文件符合规则则作为邮件附件发送；不传则强制走 Gofile 链接方式
+python england_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com --attachments
 """
 
 import argparse
@@ -535,7 +541,7 @@ def create_gofile_account():
     return data["token"], data["rootFolder"]
 
 
-def upload_to_gofile(filepath, token, folder_id, max_retries=2):
+def upload_single_file_to_gofile(filepath, token, folder_id, max_retries=2):
     """上传单个文件到 Gofile，支持重试，返回文件信息字典"""
     filename = os.path.basename(filepath)
     filesize = os.path.getsize(filepath)
@@ -622,7 +628,7 @@ def upload_to_gofile(file_paths):
     upload_results = []
     for filepath, filesize in files_sorted:
         try:
-            result = upload_to_gofile(filepath, token, root_folder)
+            result = upload_single_file_to_gofile(filepath, token, root_folder)
             upload_results.append(result)
         except Exception as e:
             print(f"  上传失败: {os.path.basename(filepath)} - {e}")
@@ -647,8 +653,17 @@ def upload_to_gofile(file_paths):
 # ==================== 邮件发送 ====================
 
 def send_email_with_gofile_link(subject, sender, auth_code, recipient, download_link, upload_results):
-    """发送包含Gofile下载链接的邮件（HTML格式）"""
-    print(f"\n发送邮件到 {recipient}...")
+    """
+    发送包含Gofile下载链接的邮件（HTML格式）
+    recipient: 单个邮箱字符串，或多个邮箱用分号分隔的字符串
+    """
+    # 解析多个收件人（用分号分隔）
+    if ';' in recipient:
+        recipient_list = [r.strip() for r in recipient.split(';') if r.strip()]
+    else:
+        recipient_list = [recipient.strip()]
+    
+    print(f"\n发送邮件到 {len(recipient_list)} 个收件人: {', '.join(recipient_list)}...")
 
     # 文件清单表格行
     file_rows_html = ""
@@ -709,7 +724,7 @@ def send_email_with_gofile_link(subject, sender, auth_code, recipient, download_
 
     msg = MIMEMultipart("alternative")
     msg["From"] = sender
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipient_list)  # 多个收件人用逗号分隔
     msg["Subject"] = subject
 
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
@@ -718,7 +733,7 @@ def send_email_with_gofile_link(subject, sender, auth_code, recipient, download_
     try:
         server = smtplib.SMTP_SSL("smtp.qq.com", 465)
         server.login(sender, auth_code)
-        server.sendmail(sender, recipient, msg.as_string())
+        server.sendmail(sender, recipient_list, msg.as_string())
         server.quit()
         print("  [OK] 邮件发送成功！")
         return True
@@ -728,7 +743,7 @@ def send_email_with_gofile_link(subject, sender, auth_code, recipient, download_
             server = smtplib.SMTP("smtp.qq.com", 587)
             server.starttls()
             server.login(sender, auth_code)
-            server.sendmail(sender, recipient, msg.as_string())
+            server.sendmail(sender, recipient_list, msg.as_string())
             server.quit()
             print("  [OK] 邮件发送成功(TLS)！")
             return True
@@ -738,8 +753,17 @@ def send_email_with_gofile_link(subject, sender, auth_code, recipient, download_
 
 
 def send_email_with_attachments(subject, sender, auth_code, recipient, files):
-    """发送带附件的邮件（符合QQ邮箱规则）"""
-    print(f"\n发送邮件到 {recipient}（带附件）...")
+    """
+    发送带附件的邮件（符合QQ邮箱规则）
+    recipient: 单个邮箱字符串，或多个邮箱用分号分隔的字符串
+    """
+    # 解析多个收件人（用分号分隔）
+    if ';' in recipient:
+        recipient_list = [r.strip() for r in recipient.split(';') if r.strip()]
+    else:
+        recipient_list = [recipient.strip()]
+    
+    print(f"\n发送邮件到 {len(recipient_list)} 个收件人: {', '.join(recipient_list)}（带附件）...")
 
     # 文件清单
     file_rows_text = ""
@@ -782,7 +806,7 @@ def send_email_with_attachments(subject, sender, auth_code, recipient, files):
 
     msg = MIMEMultipart("mixed")
     msg["From"] = sender
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipient_list)  # 多个收件人用逗号分隔
     msg["Subject"] = subject
 
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
@@ -805,7 +829,7 @@ def send_email_with_attachments(subject, sender, auth_code, recipient, files):
     try:
         server = smtplib.SMTP_SSL("smtp.qq.com", 465)
         server.login(sender, auth_code)
-        server.sendmail(sender, recipient, msg.as_string())
+        server.sendmail(sender, recipient_list, msg.as_string())
         server.quit()
         print("  [OK] 邮件发送成功（带附件）！")
         return True
@@ -815,7 +839,7 @@ def send_email_with_attachments(subject, sender, auth_code, recipient, files):
             server = smtplib.SMTP("smtp.qq.com", 587)
             server.starttls()
             server.login(sender, auth_code)
-            server.sendmail(sender, recipient, msg.as_string())
+            server.sendmail(sender, recipient_list, msg.as_string())
             server.quit()
             print("  [OK] 邮件发送成功（带附件，TLS）！")
             return True
@@ -826,7 +850,7 @@ def send_email_with_attachments(subject, sender, auth_code, recipient, files):
 
 # ==================== 主流程 ====================
 
-def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
+def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None, attachments=False):
     """
     主流程。
     max_pages: 最大爬取页数，默认 2 页。
@@ -1083,21 +1107,29 @@ def main(max_pages=2, start_page=1, sender=None, auth_code=None, receiver=None):
             filesize = os.path.getsize(fp)
             files.append((fp, os.path.basename(fp), filesize))
 
-    # 检查是否符合QQ邮箱附件规则
-    can_send_as_attachment = True
     total_size = sum(f[2] for f in files)
 
-    # 检查单个文件大小
-    for filepath, filename, filesize in files:
-        if filesize > QQ_MAX_SINGLE_FILE_SIZE:
-            can_send_as_attachment = False
-            print(f"\n  ⚠️ 文件 {filename} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
-            break
-
-    # 检查总大小
-    if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+    # 判断发送方式
+    # - 不传 --attachments：强制走 Gofile 方式
+    # - 传 --attachments：按现有规则判断
+    if not attachments:
+        # 强制走 Gofile 方式
         can_send_as_attachment = False
-        print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
+    else:
+        # 检查是否符合QQ邮箱附件规则
+        can_send_as_attachment = True
+
+        # 检查单个文件大小
+        for filepath, filename, filesize in files:
+            if filesize > QQ_MAX_SINGLE_FILE_SIZE:
+                can_send_as_attachment = False
+                print(f"\n  ⚠️ 文件 {filename} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
+                break
+
+        # 检查总大小
+        if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+            can_send_as_attachment = False
+            print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
 
     # 上传并发送邮件
     if sender and auth_code and receiver and saved_files:
@@ -1178,6 +1210,10 @@ if __name__ == "__main__":
         "--start-page", required=False, default="1",
         help="起始页码，默认 1。从指定页码开始爬取"
     )
+    parser.add_argument(
+        "--attachments", action="store_true",
+        help="传此参数时，文件符合规则则作为邮件附件发送；不传则强制走 Gofile 链接方式"
+    )
     args = parser.parse_args()
 
     # 解析 max_pages 参数
@@ -1202,4 +1238,4 @@ if __name__ == "__main__":
         print(f"警告: --start-page 参数无效 '{args.start_page}'，使用默认值 1")
         start_page = 1
 
-    main(sender=args.sender, auth_code=args.auth_code, receiver=args.receiver, max_pages=max_pages, start_page=start_page)
+    main(sender=args.sender, auth_code=args.auth_code, receiver=args.receiver, max_pages=max_pages, start_page=start_page, attachments=args.attachments)

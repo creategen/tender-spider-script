@@ -40,6 +40,9 @@ python australia_tender.py --start-page 1 --max-pages 5
 # 带邮件发送
 python australia_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com
 
+# 传 --attachments 时，文件符合规则则作为邮件附件发送；不传则强制走 Gofile 链接方式
+python australia_tender.py --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com --attachments
+
 # 完整示例：爬取搜索页面，仅Atm和Son类型，仅Closed状态，从第2页开始爬3页，并发送邮件
 python australia_tender.py --type 0 --tender-type Atm,Son,Cn --search-status full --rss-status close --start-page 1 --max-pages full --sender xxx@qq.com --auth-code xxx --receiver xxx@qq.com
 
@@ -52,7 +55,14 @@ python australia_tender.py --type 0 --tender-type Atm,Son,Cn --search-status ful
   --max-pages     最大爬取页数，默认full（全部页）
   --sender        发件邮箱（QQ邮箱）
   --auth-code     发件邮箱SMTP授权码
-  --receiver      收件邮箱
+  --receiver      收件邮箱，多个邮箱用分号分隔（如：xxx@qq.com;yyy@live.com）
+  --attachments   传此参数时，文件符合规则则作为邮件附件发送；不传则强制走 Gofile 链接方式
+
+QQ邮箱附件规则：
+  - 单个附件 ≤ 20MB
+  - 全部附件总大小 ≤ 50MB
+  传 --attachments 时，符合规则则直接作为邮件附件发送，否则上传到Gofile.io并发送下载链接。
+  不传 --attachments 时，强制上传到Gofile.io并发送下载链接。
 """
 
 import argparse
@@ -867,8 +877,17 @@ def upload_to_gofile(file_paths):
 # ==================== 邮件发送 ====================
 
 def send_email(sender, auth_code, receiver, download_link, file_info_list):
-    """发送包含下载链接的邮件"""
-    print(f"\n[步骤] 发送邮件到 {receiver}...")
+    """
+    发送包含下载链接的邮件
+    receiver: 单个邮箱字符串，或多个邮箱用分号分隔的字符串
+    """
+    # 解析多个收件人（用分号分隔）
+    if ';' in receiver:
+        receiver_list = [r.strip() for r in receiver.split(';') if r.strip()]
+    else:
+        receiver_list = [receiver.strip()]
+    
+    print(f"\n[步骤] 发送邮件到 {len(receiver_list)} 个收件人: {', '.join(receiver_list)}...")
 
     subject = "澳大利亚 AusTender 招标数据爬取结果 - Excel下载链接"
 
@@ -925,7 +944,7 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
 
     msg = MIMEMultipart("alternative")
     msg["From"] = sender
-    msg["To"] = receiver
+    msg["To"] = ", ".join(receiver_list)  # 多个收件人用逗号分隔
     msg["Subject"] = subject
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
@@ -933,15 +952,24 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
     try:
         with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
             server.login(sender, auth_code)
-            server.sendmail(sender, receiver, msg.as_string())
+            server.sendmail(sender, receiver_list, msg.as_string())
         print("  邮件发送成功!")
     except Exception as e:
         print(f"  邮件发送失败: {e}")
 
 
 def send_email_with_attachments(sender, auth_code, receiver, files, file_records):
-    """发送带附件的邮件（符合QQ邮箱规则）"""
-    print(f"\n[步骤] 发送邮件到 {receiver}（带附件）...")
+    """
+    发送带附件的邮件（符合QQ邮箱规则）
+    receiver: 单个邮箱字符串，或多个邮箱用分号分隔的字符串
+    """
+    # 解析多个收件人（用分号分隔）
+    if ';' in receiver:
+        receiver_list = [r.strip() for r in receiver.split(';') if r.strip()]
+    else:
+        receiver_list = [receiver.strip()]
+    
+    print(f"\n[步骤] 发送邮件到 {len(receiver_list)} 个收件人: {', '.join(receiver_list)}（带附件）...")
 
     subject = "澳大利亚 AusTender 招标数据爬取结果 - Excel附件"
 
@@ -988,7 +1016,7 @@ def send_email_with_attachments(sender, auth_code, receiver, files, file_records
 
     msg = MIMEMultipart("mixed")
     msg["From"] = sender
-    msg["To"] = receiver
+    msg["To"] = ", ".join(receiver_list)  # 多个收件人用逗号分隔
     msg["Subject"] = subject
 
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
@@ -1011,7 +1039,7 @@ def send_email_with_attachments(sender, auth_code, receiver, files, file_records
     try:
         with smtplib.SMTP_SSL("smtp.qq.com", 465) as server:
             server.login(sender, auth_code)
-            server.sendmail(sender, receiver, msg.as_string())
+            server.sendmail(sender, receiver_list, msg.as_string())
         print("  邮件发送成功（带附件）!")
         return True
     except Exception as e:
@@ -1020,7 +1048,7 @@ def send_email_with_attachments(sender, auth_code, receiver, files, file_records
             server = smtplib.SMTP("smtp.qq.com", 587)
             server.starttls()
             server.login(sender, auth_code)
-            server.sendmail(sender, receiver, msg.as_string())
+            server.sendmail(sender, receiver_list, msg.as_string())
             server.quit()
             print("  邮件发送成功（带附件，TLS）！")
             return True
@@ -1031,7 +1059,7 @@ def send_email_with_attachments(sender, auth_code, receiver, files, file_records
 
 # ==================== 主流程 ====================
 
-def main(crawl_type=None, max_pages="full", start_page=1, sender=None, auth_code=None, receiver=None, search_status="full", rss_status="full", tender_types=None):
+def main(crawl_type=None, max_pages="full", start_page=1, sender=None, auth_code=None, receiver=None, search_status="full", rss_status="full", tender_types=None, attachments=False):
     """
     主流程
 
@@ -1088,20 +1116,28 @@ def main(crawl_type=None, max_pages="full", start_page=1, sender=None, auth_code
             files.append((filepath, filename, filesize))
             file_records_dict[filename] = rec_count
 
-        # 检查是否符合QQ邮箱附件规则
-        can_send_as_attachment = True
+        # 判断发送方式
+        # - 不传 --attachments：强制走 Gofile 方式
+        # - 传 --attachments：按现有规则判断
         total_size = sum(f[2] for f in files)
-        
-        # 检查单个文件大小
-        for filepath, filename, filesize in files:
-            if filesize > QQ_MAX_SINGLE_FILE_SIZE:
-                can_send_as_attachment = False
-                print(f"\n  ⚠️ 文件 {filename} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
-                break
-        
-        # 检查总大小
-        if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+
+        if not attachments:
+            # 强制走 Gofile 方式
             can_send_as_attachment = False
+        else:
+            # 检查是否符合QQ邮箱附件规则
+            can_send_as_attachment = True
+
+            # 检查单个文件大小
+            for filepath, filename, filesize in files:
+                if filesize > QQ_MAX_SINGLE_FILE_SIZE:
+                    can_send_as_attachment = False
+                    print(f"\n  ⚠️ 文件 {filename} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
+                    break
+
+            # 检查总大小
+            if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+                can_send_as_attachment = False
             print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
 
         if can_send_as_attachment:
@@ -1165,6 +1201,7 @@ def main(crawl_type=None, max_pages="full", start_page=1, sender=None, auth_code
         print("\n[提示] 未提供邮件参数，跳过上传和邮件发送")
         print("  如需上传并发送邮件，请使用:")
         print("  python australia_tender.py --sender 发件邮箱 --auth-code 授权码 --receiver 收件邮箱")
+        print("  多个收件邮箱用分号分隔，如: --receiver xxx@qq.com;yyy@live.com")
 
 
 if __name__ == "__main__":
@@ -1206,6 +1243,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rss-status", required=False, default="full",
         help="RSS爬取状态筛选：full=全部（默认）, close=仅Closed, open=仅非Closed"
+    )
+    parser.add_argument(
+        "--attachments", action="store_true",
+        help="传此参数时，文件符合规则则作为邮件附件发送；不传则强制走 Gofile 链接方式"
     )
     args = parser.parse_args()
 
@@ -1282,5 +1323,6 @@ if __name__ == "__main__":
         receiver=args.receiver,
         search_status=search_status,
         rss_status=rss_status,
-        tender_types=tender_types
+        tender_types=tender_types,
+        attachments=args.attachments
     )

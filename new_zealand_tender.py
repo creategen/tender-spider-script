@@ -10,16 +10,18 @@
 参数说明：
   --sender        发件邮箱（QQ邮箱）
   --auth-code     发件邮箱SMTP授权码
-  --receiver      收件邮箱
+  --receiver      收件邮箱，多个邮箱用分号分隔（如：xxx@qq.com;yyy@live.com）
 选项：
   --full        全量爬取（默认仅爬取"当前招标"）
   --progress    按照进度文件记录的进度爬取（不传则强制重新爬取，忽略进度文件）
   --skip-upload  跳过Gofile上传和邮件发送
+  --attachments  传此参数时，文件符合规则则作为邮件附件发送；不传则强制走 Gofile 链接方式
 
 QQ邮箱附件规则：
   - 单个附件 ≤ 20MB
   - 全部附件总大小 ≤ 50MB
-  符合规则则直接作为邮件附件发送，否则上传到Gofile.io并发送下载链接。
+  传 --attachments 时，符合规则则直接作为邮件附件发送，否则上传到Gofile.io并发送下载链接。
+  不传 --attachments 时，强制上传到Gofile.io并发送下载链接。
 
 依赖：
   pip3 install playwright requests beautifulsoup4 openpyxl
@@ -473,8 +475,17 @@ def upload_to_gofile(file_paths):
 # ==================== 第六步：发送邮件 ====================
 
 def send_email_with_gofile_link(sender, auth_code, receiver, download_link, file_info_list):
-    """发送包含Gofile下载链接的邮件（HTML格式）"""
-    print(f"\n发送邮件到 {receiver}...")
+    """
+    发送包含Gofile下载链接的邮件（HTML格式）
+    receiver: 单个邮箱字符串，或多个邮箱用分号分隔的字符串
+    """
+    # 解析多个收件人（用分号分隔）
+    if ';' in receiver:
+        receiver_list = [r.strip() for r in receiver.split(';') if r.strip()]
+    else:
+        receiver_list = [receiver.strip()]
+    
+    print(f"\n发送邮件到 {len(receiver_list)} 个收件人: {', '.join(receiver_list)}...")
 
     subject = "新西兰GETS政府招标网站爬取结果 - Excel下载链接"
 
@@ -533,7 +544,7 @@ def send_email_with_gofile_link(sender, auth_code, receiver, download_link, file
 
     msg = MIMEMultipart("alternative")
     msg["From"] = sender
-    msg["To"] = receiver
+    msg["To"] = ", ".join(receiver_list)  # 多个收件人用逗号分隔
     msg["Subject"] = subject
 
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
@@ -542,7 +553,7 @@ def send_email_with_gofile_link(sender, auth_code, receiver, download_link, file
     try:
         server = smtplib.SMTP_SSL("smtp.qq.com", 465)
         server.login(sender, auth_code)
-        server.sendmail(sender, receiver, msg.as_string())
+        server.sendmail(sender, receiver_list, msg.as_string())
         server.quit()
         print("  ✓ 邮件发送成功！")
         return True
@@ -552,7 +563,7 @@ def send_email_with_gofile_link(sender, auth_code, receiver, download_link, file
             server = smtplib.SMTP("smtp.qq.com", 587)
             server.starttls()
             server.login(sender, auth_code)
-            server.sendmail(sender, receiver, msg.as_string())
+            server.sendmail(sender, receiver_list, msg.as_string())
             server.quit()
             print("  ✓ 邮件发送成功(TLS)！")
             return True
@@ -562,8 +573,17 @@ def send_email_with_gofile_link(sender, auth_code, receiver, download_link, file
 
 
 def send_email_with_attachments(sender, auth_code, receiver, file_info_list, output_files):
-    """发送带附件的邮件（符合QQ邮箱规则）"""
-    print(f"\n发送邮件到 {receiver}（带附件）...")
+    """
+    发送带附件的邮件（符合QQ邮箱规则）
+    receiver: 单个邮箱字符串，或多个邮箱用分号分隔的字符串
+    """
+    # 解析多个收件人（用分号分隔）
+    if ';' in receiver:
+        receiver_list = [r.strip() for r in receiver.split(';') if r.strip()]
+    else:
+        receiver_list = [receiver.strip()]
+    
+    print(f"\n发送邮件到 {len(receiver_list)} 个收件人: {', '.join(receiver_list)}（带附件）...")
 
     subject = "新西兰GETS政府招标网站爬取结果 - Excel附件"
 
@@ -602,7 +622,7 @@ def send_email_with_attachments(sender, auth_code, receiver, file_info_list, out
 
     msg = MIMEMultipart("mixed")
     msg["From"] = sender
-    msg["To"] = receiver
+    msg["To"] = ", ".join(receiver_list)  # 多个收件人用逗号分隔
     msg["Subject"] = subject
 
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
@@ -626,7 +646,7 @@ def send_email_with_attachments(sender, auth_code, receiver, file_info_list, out
     try:
         server = smtplib.SMTP_SSL("smtp.qq.com", 465)
         server.login(sender, auth_code)
-        server.sendmail(sender, receiver, msg.as_string())
+        server.sendmail(sender, receiver_list, msg.as_string())
         server.quit()
         print("  ✓ 邮件发送成功（带附件）！")
         return True
@@ -636,7 +656,7 @@ def send_email_with_attachments(sender, auth_code, receiver, file_info_list, out
             server = smtplib.SMTP("smtp.qq.com", 587)
             server.starttls()
             server.login(sender, auth_code)
-            server.sendmail(sender, receiver, msg.as_string())
+            server.sendmail(sender, receiver_list, msg.as_string())
             server.quit()
             print("  ✓ 邮件发送成功（带附件，TLS）！")
             return True
@@ -656,6 +676,10 @@ def main():
     parser.add_argument("--skip-upload", action="store_true", help="跳过Gofile上传和邮件发送")
     parser.add_argument("--full", action="store_true", help="全量爬取（默认仅爬取当前招标）")
     parser.add_argument("--progress", action="store_true", help="按照进度文件记录的进度爬取（不传则强制重新爬取，忽略进度文件）")
+    parser.add_argument(
+        "--attachments", action="store_true",
+        help="传此参数时，文件符合规则则作为邮件附件发送；不传则强制走 Gofile 链接方式"
+    )
     args = parser.parse_args()
 
     # 设置输出目录
@@ -734,17 +758,27 @@ def main():
         })
 
     # ===== 判断发送方式 =====
-    # 检查单个文件大小
-    for fpath, fname, filesize in output_files_with_size:
-        if filesize > QQ_MAX_SINGLE_FILE_SIZE:
-            can_send_as_attachment = False
-            print(f"\n  ⚠️ 文件 {fname} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
-            break
-
-    # 检查总大小
-    if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+    # 判断发送方式
+    # - 不传 --attachments：强制走 Gofile 方式
+    # - 传 --attachments：按现有规则判断
+    if not args.attachments:
+        # 强制走 Gofile 方式
         can_send_as_attachment = False
-        print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
+    else:
+        # 检查是否符合QQ邮箱附件规则
+        can_send_as_attachment = True
+
+        # 检查单个文件大小
+        for fpath, fname, filesize in output_files_with_size:
+            if filesize > QQ_MAX_SINGLE_FILE_SIZE:
+                can_send_as_attachment = False
+                print(f"\n  ⚠️ 文件 {fname} 大小 {filesize/1024/1024:.1f}MB 超过20MB限制")
+                break
+
+        # 检查总大小
+        if can_send_as_attachment and total_size > QQ_MAX_TOTAL_SIZE:
+            can_send_as_attachment = False
+            print(f"\n  ⚠️ 文件总大小 {total_size/1024/1024:.1f}MB 超过50MB限制")
 
     if can_send_as_attachment:
         # 方式1：作为邮件附件发送
