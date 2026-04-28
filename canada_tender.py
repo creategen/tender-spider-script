@@ -18,10 +18,9 @@ import argparse
 import os
 import re
 import smtplib
-import sys
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -610,7 +609,9 @@ def main():
                 resource_name = re.sub(
                     r'[<>:"/\\|?*]', "_", res["text"].strip()
                 )
-                new_filename = f"加拿大-招标-{resource_name}.{ext}"
+                tz_beijing = timezone(timedelta(hours=8))
+                timestamp = datetime.now(tz_beijing).strftime("%Y%m%d")
+                new_filename = f"加拿大-招标-{resource_name}-{timestamp}.{ext}"
                 save_path = os.path.join(SAVE_DIR, new_filename)
 
                 try:

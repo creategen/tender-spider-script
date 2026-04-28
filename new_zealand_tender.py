@@ -33,7 +33,6 @@ import json
 import os
 import re
 import smtplib
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
@@ -383,7 +382,7 @@ def scrape_category(site_config, progress_file, use_progress=False):
     # 使用东八区时间
     tz_beijing = timezone(timedelta(hours=8))
     now = datetime.now(tz_beijing)
-    timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
+    timestamp = now.strftime("%Y%m%d")
     filename = f"新西兰-{category}-{timestamp}.xlsx"
     output_path = os.path.join(OUTPUT_DIR, filename)
     create_excel(data_list, category, output_path)

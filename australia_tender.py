@@ -32,7 +32,7 @@ python australia_tender.py --rss-status open
 
 # 仅爬取指定类型的详情页（不传则爬取全部类型）
 python australia_tender.py --tender-type Atm,Son
-python australia_tender.py --tender-type Cn
+python australia_tender.py --tender-type Cn,Advert
 
 # 指定页数
 python australia_tender.py --start-page 1 --max-pages 5
@@ -48,7 +48,8 @@ python australia_tender.py --type 0 --tender-type Atm,Son,Cn --search-status ful
 
 参数说明：
   --type          爬取类型：不传或传0执行两种爬取，1仅搜索页面，2仅RSS XML
-  --tender-type   详情页类型筛选：不传则爬取全部类型，可指定 Atm/Son/Cn（多个用逗号分隔）
+  --tender-type   详情页类型筛选：不传则爬取全部类型，可指定任意类型值（多个用逗号分隔）
+                    程序会检查指定的类型值是否存在于详情页URL中，存在则保留
   --search-status 搜索页面状态筛选：full=全部（默认）, close=仅Closed, open=仅非Closed
   --rss-status    RSS爬取状态筛选：full=全部（默认）, close=仅Closed, open=仅非Closed
   --start-page    起始页码，默认1
@@ -69,7 +70,7 @@ import argparse
 import os
 import smtplib
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -90,9 +91,9 @@ urllib3.disable_warnings(InsecureRequestWarning)
 # ==================== 固定配置 ====================
 
 # 网站爬取1 配置
-SEARCH_URL = "https://www.tenders.gov.au/Search/KeywordSearch?keyword=ATM2"
+SEARCH_URL = "https://www.tenders.gov.au/atm?Keyword=&Number=&Filter=&submitSort=Go&OrderBy=Last+Updated+-+Descending&sort="
 BASE_URL = "https://www.tenders.gov.au"
-LIST_SELECTOR = "article"  # 每个搜索结果是一个 <article> 元素
+LIST_SELECTOR = "a.detail"  # 每条数据的详情页
 NEXT_PAGE_SELECTOR = 'a[aria-label="Next page"]'
 
 # 网站爬取2 配置
@@ -461,8 +462,8 @@ def crawl_search_page(max_pages, start_page, status_filter="full", tender_types=
         "full": 保存所有数据
         "close": 仅保存包含Closed的数据
         "open": 仅保存不包含Closed的数据
-    tender_types: 详情页类型筛选列表，如 ["Atm", "Son", "Cn"]，None 表示全部类型
-        可选值：Atm, Son, Cn
+    tender_types: 详情页类型筛选列表，如 ["Atm", "Son", "Cn", "Advert"]，None 表示全部类型
+                  可以指定任意类型值，程序会检查类型值是否存在于详情页URL中
     """
     import time
 
@@ -481,9 +482,11 @@ def crawl_search_page(max_pages, start_page, status_filter="full", tender_types=
     counter = 0
 
     # 计算当前年份
-    current_year = datetime.now().year
+    tz_beijing = timezone(timedelta(hours=8))
+    current_year = datetime.now(tz_beijing).year
+    timestamp = datetime.now(tz_beijing).strftime("%Y%m%d")
     os.makedirs(SAVE_DIR, exist_ok=True)
-    file_name = f"澳大利亚-{current_year}年当前采购项目.xlsx"
+    file_name = f"澳大利亚-{current_year}年当前采购项目-{timestamp}.xlsx"
     file_path = os.path.join(SAVE_DIR, file_name)
 
     with sync_playwright() as p:
@@ -548,50 +551,39 @@ def crawl_search_page(max_pages, start_page, status_filter="full", tender_types=
 
             # 收集当前页所有详情页链接
             try:
-                list_divs = page.query_selector_all(LIST_SELECTOR)
-                
-                print(f"  本页找到 {len(list_divs)} 个列表项")
+                links = page.query_selector_all(LIST_SELECTOR)
 
-                if not list_divs:
+                if not links:
                     print("  未找到列表项，爬取结束")
                     break
 
+                print(f"  本页找到 {len(links)} 个列表项")
+
                 detail_urls = []
-                
-                for div in list_divs:
-                    # 在列表项中查找链接
-                    links = div.query_selector_all("a[href]")
-                    for link in links:
-                        href = link.get_attribute("href")
+                for link in links:
+                    href = link.get_attribute("href")
+                    if href:
+                        if href.startswith("/"):
+                            href = BASE_URL + href
+                        elif not href.startswith("http"):
+                            href = BASE_URL + "/" + href
                         
-                        if href:
-                            if href.startswith("/"):
-                                href = BASE_URL + href
-                            elif not href.startswith("http"):
-                                href = BASE_URL + "/" + href
-                            
-                            # 匹配详情页链接格式：/Atm/Show/, /Son/Show/, /Cn/Show/
-                            # 根据 tender_types 筛选
-                            is_atm = "/Atm/Show/" in href
-                            is_son = "/Son/Show/" in href
-                            is_cn = "/Cn/Show/" in href
-                            
-                            if is_atm or is_son or is_cn:
-                                # 如果指定了类型筛选，按类型过滤
-                                if tender_types is not None:
-                                    if is_atm and "Atm" in tender_types:
-                                        detail_urls.append(href)
-                                    elif is_son and "Son" in tender_types:
-                                        detail_urls.append(href)
-                                    elif is_cn and "Cn" in tender_types:
-                                        detail_urls.append(href)
-                                else:
-                                    # 未指定类型筛选，获取全部
-                                    detail_urls.append(href)
+                        # 根据 tender_types 筛选
+                        # 如果不传 tender_types，则无需对 href 做判断，获取全部
+                        # 如果传了 tender_types，则检查是否有任一类型存在于 href 中
+                        if tender_types is None:
+                            # 未指定类型筛选，获取全部详情页链接
+                            detail_urls.append(href)
+                        else:
+                            # 检查 tender_types 中的值是否有其一存在于 href 中
+                            if any(t in href for t in tender_types):
+                                detail_urls.append(href)
+                            else:
+                                print(f"  跳过不匹配的类型链接: {href}")
 
                 # 去重
                 detail_urls = list(dict.fromkeys(detail_urls))
-                print(f"  找到 {len(detail_urls)} 个详情页链接")
+                print(f"  匹配到 {len(detail_urls)} 个符合tender-type参数的详情页链接")
 
             except Exception as e:
                 print(f"  [错误] 收集链接失败: {e}")
@@ -690,7 +682,9 @@ def crawl_rss_xml(status_filter="full"):
 
     # 保存文件名
     os.makedirs(SAVE_DIR, exist_ok=True)
-    file_path = os.path.join(SAVE_DIR, "澳大利亚-RSS采购数据.xlsx")
+    tz_beijing = timezone(timedelta(hours=8))
+    timestamp = datetime.now(tz_beijing).strftime("%Y%m%d")
+    file_path = os.path.join(SAVE_DIR, f"澳大利亚-RSS采购数据-{timestamp}.xlsx")
 
     # 获取 RSS XML
     print("\n[步骤1] 获取 RSS XML...")
@@ -1074,7 +1068,8 @@ def main(crawl_type=None, max_pages="full", start_page=1, sender=None, auth_code
     sender/auth_code/receiver: 邮件参数
     search_status: 搜索页面状态筛选 (full/close/open)
     rss_status: RSS爬取状态筛选 (full/close/open)
-    tender_types: 详情页类型筛选列表，如 ["Atm", "Son", "Cn"]，None 表示全部类型
+    tender_types: 详情页类型筛选列表，如 ["Atm", "Son", "Cn", "Advert"]，None 表示全部类型
+                  可以指定任意类型值，程序会检查类型值是否存在于详情页URL中
     """
     print("=" * 60)
     print("澳大利亚 AusTender 招标数据爬取")
@@ -1234,7 +1229,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--tender-type", required=False, default=None,
-        help="详情页类型筛选：不传则爬取全部类型，可指定 Atm/Son/Cn（多个用逗号分隔）"
+        help="详情页类型筛选：不传则爬取全部类型，可指定任意类型值（多个用逗号分隔），程序会检查类型值是否存在于URL中"
     )
     parser.add_argument(
         "--search-status", required=False, default="full",
@@ -1287,18 +1282,10 @@ if __name__ == "__main__":
 
     # 解析 tender-type 参数
     tender_types = None
-    valid_types = {"Atm", "Son", "Cn"}
     if args.tender_type:
         types_str = args.tender_type.strip()
         if types_str:
             tender_types = [t.strip() for t in types_str.split(",")]
-            # 验证类型有效性
-            invalid_types = [t for t in tender_types if t not in valid_types]
-            if invalid_types:
-                print(f"警告: --tender-type 参数包含无效类型: {invalid_types}，有效值为: {sorted(valid_types)}")
-                tender_types = [t for t in tender_types if t in valid_types]
-                if not tender_types:
-                    tender_types = None
             print(f"[信息] 将爬取以下类型: {tender_types}")
 
     # 解析 search-status 参数
