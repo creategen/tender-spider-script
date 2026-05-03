@@ -897,7 +897,8 @@ def send_email(sender, auth_code, receiver, download_link, file_info_list):
 """
         file_rows_text += f"{i}. {info['filename']} ({info['records']}条)\n"
 
-    now_str = datetime.now().strftime('%Y-%m-%d')
+    tz_beijing = timezone(timedelta(hours=8))
+    now_str = datetime.now(tz_beijing).strftime('%Y-%m-%d %H:%M:%S')
     total_records = sum(f['records'] for f in file_info_list)
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
@@ -979,7 +980,8 @@ def send_email_with_attachments(sender, auth_code, receiver, files, file_records
         records = file_records.get(filename, 0)
         file_rows_text += f"{i}. {filename} ({size_str}, {records}条记录)\n"
 
-    now_str = datetime.now().strftime('%Y-%m-%d')
+    tz_beijing = timezone(timedelta(hours=8))
+    now_str = datetime.now(tz_beijing).strftime('%Y-%m-%d %H:%M:%S')
     total_records = sum(file_records.values())
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">

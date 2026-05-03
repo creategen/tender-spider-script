@@ -501,7 +501,8 @@ def send_email_with_gofile_link(sender, auth_code, receiver, download_link, file
 """
         file_rows_text += f"{i}. {info['filename']} ({info['category']}, {info['records']}条)\n"
 
-    now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y年%m月%d日')
+    tz_beijing = timezone(timedelta(hours=8))
+    now_str = datetime.now(tz_beijing).strftime('%Y-%m-%d %H:%M:%S')
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; font-size: 14px; line-height: 1.8; max-width: 700px; margin: 0 auto;">
 <h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">新西兰 GETS 政府招标网站爬取结果</h2>
@@ -591,7 +592,8 @@ def send_email_with_attachments(sender, auth_code, receiver, file_info_list, out
     for i, info in enumerate(file_info_list, 1):
         file_rows_text += f"{i}. {info['filename']} ({info['category']}, {info['records']}条)\n"
 
-    now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y年%m月%d日')
+    tz_beijing = timezone(timedelta(hours=8))
+    now_str = datetime.now(tz_beijing).strftime('%Y-%m-%d %H:%M:%S')
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; color: #333; font-size: 14px; line-height: 1.8; max-width: 700px; margin: 0 auto;">
 <h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">新西兰 GETS 政府招标网站爬取结果</h2>

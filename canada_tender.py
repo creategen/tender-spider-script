@@ -188,7 +188,8 @@ def send_email_with_gofile_link(subject, sender, auth_code, recipient, download_
 """
         file_rows_text += f"{i}. {r['filename']} ({size_str})\n"
 
-    now_str = datetime.now().strftime('%Y年%m月%d日')
+    tz_beijing = timezone(timedelta(hours=8))
+    now_str = datetime.now(tz_beijing).strftime('%Y-%m-%d %H:%M:%S')
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; font-size: 15px; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
 <h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">加拿大开放数据平台 - 招标数据爬取结果</h2>
@@ -282,7 +283,8 @@ def send_email_with_attachments(subject, sender, auth_code, recipient, files):
             size_str = f"{filesize/1024:.1f} KB"
         file_rows_text += f"{i}. {filename} ({size_str})\n"
 
-    now_str = datetime.now().strftime('%Y年%m月%d日')
+    tz_beijing = timezone(timedelta(hours=8))
+    now_str = datetime.now(tz_beijing).strftime('%Y-%m-%d %H:%M:%S')
 
     html_body = f"""<html><body style="font-family: Microsoft YaHei, Arial, sans-serif; font-size: 15px; color: #333; line-height: 1.8; max-width: 700px; margin: 0 auto;">
 <h2 style="color: #1a5276; border-bottom: 2px solid #2980b9; padding-bottom: 8px; font-size: 20px;">加拿大开放数据平台 - 招标数据爬取结果</h2>
